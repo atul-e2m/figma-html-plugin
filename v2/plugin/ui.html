@@ -1,0 +1,93 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 12px/1.45 Inter, system-ui, sans-serif; margin: 0; padding: 14px; color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff); }
+  h1 { font-size: 13px; margin: 0 0 4px; }
+  .muted { color: var(--figma-color-text-secondary, #777); }
+  .card { border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; padding: 10px; margin: 10px 0; }
+  .frame { display: flex; justify-content: space-between; padding: 3px 0; }
+  button { font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--figma-color-border, #ccc); background: var(--figma-color-bg-secondary, #f5f5f5); cursor: pointer; }
+  button.primary { background: var(--figma-color-bg-brand, #0d99ff); color: #fff; border-color: transparent; }
+  button:disabled { opacity: .5; cursor: default; }
+  textarea { width: 100%; box-sizing: border-box; font: 11px/1.4 ui-monospace, monospace; min-height: 44px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc); padding: 6px; background: transparent; color: inherit; }
+  .bar { height: 6px; background: var(--figma-color-bg-secondary, #eee); border-radius: 3px; overflow: hidden; margin: 8px 0 4px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--figma-color-bg-brand, #0d99ff); transition: width .2s; }
+  .err { color: #c62828; white-space: pre-wrap; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+</style></head>
+<body>
+  <h1>Figma IR Extractor</h1>
+  <div class="muted">Select one or more frames (e.g. desktop + mobile). Extract writes <code>ir.json</code>, assets and screenshots. Compile with the <code>f2h</code> CLI.</div>
+
+  <div class="card">
+    <div id="sel" class="muted">Nothing selected.</div>
+  </div>
+
+  <details class="card">
+    <summary>Rasterize (optional)</summary>
+    <div class="muted" style="margin:6px 0">Paste a <code>plan.json</code>, the output of <code>f2h raster-list</code>, or node ids one per line. Those nodes are flattened to one PNG each.</div>
+    <textarea id="raster" placeholder="12:345&#10;67:890   — or paste plan.json"></textarea>
+  </details>
+
+  <div class="row">
+    <button id="go" class="primary" disabled>Extract</button>
+    <button id="dl" disabled>Download ZIP</button>
+    <span id="msg" class="muted"></span>
+  </div>
+  <div class="bar"><i id="pct"></i></div>
+  <div id="out"></div>
+  <div id="err" class="err"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let frames = [], blobUrl = null, filename = "";
+  onmessage = (e) => {
+    const m = e.data.pluginMessage; if (!m) return;
+    if (m.type === "selection") {
+      frames = m.frames;
+      $("go").disabled = !frames.length;
+      $("sel").innerHTML = frames.length
+        ? frames.map((f) => `<div class="frame"><span>${esc(f.name)}</span><span class="muted">${f.width}×${f.height}</span></div>`).join("")
+        : (m.total ? `<span class="muted">Selected ${m.total} layer(s) — none is a Frame / Component / Group.</span>` : "Nothing selected.");
+    } else if (m.type === "progress") {
+      $("msg").textContent = m.message; $("pct").style.width = m.pct + "%";
+    } else if (m.type === "result") {
+      $("pct").style.width = "100%"; $("msg").textContent = "Done in " + m.stats.elapsed;
+      $("go").disabled = false; $("dl").disabled = false;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      blobUrl = URL.createObjectURL(new Blob([m.bytes], { type: "application/zip" })); filename = m.filename;
+      $("out").innerHTML = `<div class="card stats">
+        <span class="muted">Frames</span><span>${m.stats.frames}</span>
+        <span class="muted">Layers</span><span>${m.stats.nodes}</span>
+        <span class="muted">Assets</span><span>${m.stats.assets}</span>
+        <span class="muted">ir.json</span><span>${(m.stats.irBytes / 1024).toFixed(0)} KB</span>
+        <span class="muted">ZIP</span><span>${(m.bytes.byteLength / 1048576).toFixed(1)} MB</span>
+        ${m.stats.fonts && m.stats.fonts.length ? `<span class="muted">Fonts not on this machine</span><span>${esc(m.stats.fonts.join(", "))}</span>` : ""}</div>
+        <div class="muted">Then: <code>f2h build &lt;unzipped-folder&gt;</code></div>`;
+    } else if (m.type === "error") {
+      $("err").textContent = m.message; $("go").disabled = false; $("msg").textContent = "";
+    }
+  };
+  $("go").onclick = () => {
+    $("err").textContent = ""; $("out").innerHTML = ""; $("dl").disabled = true; $("go").disabled = true; $("pct").style.width = "2%";
+    const rasterIds = parseRaster($("raster").value);
+    parent.postMessage({ pluginMessage: { type: "extract", rasterIds } }, "*");
+  };
+  $("dl").onclick = () => { const a = document.createElement("a"); a.href = blobUrl; a.download = filename; a.click(); };
+  function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  function parseRaster(text) {
+    const t = text.trim(); if (!t) return [];
+    if (t[0] === "{" || t[0] === "[") {
+      try {
+        const j = JSON.parse(t);
+        if (Array.isArray(j)) return j.map(String);
+        if (Array.isArray(j.decorations)) return j.decorations.filter((d) => d && d.treatment === "rasterize").map((d) => String(d.id));
+        if (Array.isArray(j.rasterize)) return j.rasterize.map(String);
+      } catch (e) { $("err").textContent = "Could not parse the pasted JSON: " + e.message; return []; }
+    }
+    return t.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  }
+</script>
+</body></html>

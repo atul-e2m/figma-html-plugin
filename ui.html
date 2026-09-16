@@ -1,0 +1,885 @@
+<style>
+  :root {
+    color-scheme: light dark;
+    --brand: #5b5bd6;
+    --brand-2: #7c6ce4;
+    --ok: #12a594;
+    --warn: #e5a000;
+    --ink: var(--figma-color-text, #1a1a1a);
+    --ink-dim: color-mix(in srgb, var(--ink) 55%, transparent);
+    --bg: var(--figma-color-bg, #fff);
+    --bg-2: var(--figma-color-bg-secondary, #f5f5f7);
+    --line: var(--figma-color-border, #e3e3e8);
+    --radius: 10px;
+    --code-bg: #171722;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 11px/1.55 Inter, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; background: var(--bg); color: var(--ink);
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- header ---------- */
+  .top {
+    display: flex; align-items: center; gap: 9px;
+    padding: 13px 16px;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+    color: #fff;
+  }
+  .top .logo {
+    width: 24px; height: 24px; border-radius: 7px; flex: none;
+    background: rgba(255,255,255,.18);
+    display: grid; place-items: center;
+  }
+  .top h1 { font-size: 12.5px; margin: 0; font-weight: 650; letter-spacing: -.1px; }
+  .top .sub { font-size: 10px; opacity: .8; margin-top: 1px; }
+
+  .pad { padding: 14px 16px 0; overflow-y: auto; flex: 1; }
+
+  /* ---------- selection card ---------- */
+  .sel {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 12px; border-radius: var(--radius);
+    background: var(--bg-2); border: 1px solid var(--line);
+    margin-bottom: 15px;
+  }
+  .sel .ico { width: 30px; height: 30px; border-radius: 8px; flex: none; display: grid; place-items: center;
+              background: color-mix(in srgb, var(--brand) 12%, transparent); color: var(--brand); }
+  .sel.bad { border-color: color-mix(in srgb, #e5484d 45%, transparent);
+             background: color-mix(in srgb, #e5484d 7%, transparent); }
+  .sel.bad .ico { background: color-mix(in srgb, #e5484d 14%, transparent); color: #e5484d; }
+  .name { font-weight: 620; font-size: 11.5px; word-break: break-word; line-height: 1.35; }
+  .dim { opacity: .58; margin-top: 1px; font-size: 10px; }
+
+  /* ---------- segmented control ---------- */
+  .lbl { display: block; margin: 0 0 7px; font-weight: 620; font-size: 10px;
+         text-transform: uppercase; letter-spacing: .5px; opacity: .55; }
+  .seg { display: flex; gap: 3px; padding: 3px; background: var(--bg-2);
+         border: 1px solid var(--line); border-radius: 9px; }
+  .seg label { flex: 1; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg span { display: flex; align-items: center; justify-content: center; gap: 5px;
+              padding: 7px 4px; border-radius: 6px; cursor: pointer; font-weight: 600;
+              font-size: 10.5px; transition: .14s; }
+  .seg span:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .seg input:checked + span { background: var(--brand); color: #fff;
+              box-shadow: 0 1px 3px color-mix(in srgb, var(--brand) 40%, transparent); }
+  .row { display: flex; align-items: center; gap: 7px; margin: 11px 0 0; }
+  .row label { font-size: 10.5px; cursor: pointer; }
+
+  /* ---------- buttons ---------- */
+  .primary {
+    width: 100%; margin-top: 16px; padding: 11px; border-radius: 9px; border: none;
+    font-weight: 650; font-size: 11.5px; cursor: pointer; color: #fff;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--brand) 32%, transparent);
+    transition: .15s;
+  }
+  .primary:hover:not(:disabled) { filter: brightness(1.07); }
+  .primary:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+
+  .bar { height: 4px; border-radius: 3px; background: var(--bg-2); overflow: hidden;
+         margin-top: 12px; display: none; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 3px;
+           background: linear-gradient(90deg, var(--brand), var(--brand-2)); transition: width .25s; }
+  .msg { margin-top: 8px; min-height: 15px; font-size: 10.5px; opacity: .75; }
+  .err { color: #e5484d; opacity: 1; font-weight: 600; }
+
+  /* ---------- results ---------- */
+  #result { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .tabs { display: flex; gap: 3px; padding: 9px 12px 0; background: var(--code-bg); flex: none;
+          overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 6px 11px; cursor: pointer; border-radius: 7px 7px 0 0; font-size: 10px;
+         color: #8b8b9e; white-space: nowrap; font-weight: 550; transition: .12s; }
+  .tab:hover { color: #c5c5d2; }
+  .tab.on { background: #21212f; color: #fff; }
+  .codewrap { position: relative; flex: 1; min-height: 80px; overflow: auto; background: var(--code-bg); }
+  pre { margin: 0; padding: 12px 14px; font: 10px/1.6 "SF Mono", Menlo, monospace;
+        color: #c8c8d4; white-space: pre; }
+  .copy { position: absolute; top: 8px; right: 10px; background: rgba(255,255,255,.08);
+          color: #c8c8d4; border: 1px solid rgba(255,255,255,.14); border-radius: 6px;
+          padding: 4px 9px; cursor: pointer; font-size: 9.5px; font-weight: 600;
+          display: flex; align-items: center; gap: 4px; backdrop-filter: blur(8px); }
+  .copy:hover { background: rgba(255,255,255,.15); color: #fff; }
+  .tag { color: #7ab8f5; } .att { color: #b5e0a0; } .val { color: #e8a97e; }
+  .sel2 { color: #f0d48a; } .prop { color: #9cdcfe; } .num { color: #b5cea8; } .com { color: #6a7a8c; }
+
+  .pvbar { display: flex; align-items: center; justify-content: space-between;
+           padding: 9px 14px; border-top: 1px solid var(--line); cursor: pointer;
+           background: var(--bg-2); flex: none; user-select: none; }
+  .pvbar:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .pvleft { display: flex; align-items: center; gap: 7px; }
+  .pvbar b { font-weight: 650; font-size: 11px; }
+  .chev { transition: transform .22s; opacity: .5; display: flex; }
+  .chev.open { transform: rotate(180deg); }
+  .score { font-size: 9.5px; opacity: .6; }
+  .pill { display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
+          border-radius: 20px; font-size: 9px; font-weight: 650;
+          background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  #preview { display: none; height: 330px; border-top: 1px solid var(--line); background: #fff; flex: none; }
+  #preview iframe { width: 100%; height: 100%; border: none; }
+
+  .foot { padding: 11px 14px; border-top: 1px solid var(--line); display: flex; gap: 8px; flex: none; }
+  .foot button { flex: 1; padding: 10px; border-radius: 8px; font-size: 11px; font-weight: 620;
+                 cursor: pointer; border: 1px solid var(--line); background: var(--bg);
+                 color: var(--ink); display: flex; align-items: center; justify-content: center; gap: 6px;
+                 transition: .14s; }
+  .foot button:hover:not(:disabled) { background: var(--bg-2); }
+  .foot button.dl { background: linear-gradient(135deg, var(--brand), var(--brand-2));
+                    color: #fff; border-color: transparent;
+                    box-shadow: 0 2px 8px color-mix(in srgb, var(--brand) 30%, transparent); }
+  .foot button.dl:hover:not(:disabled) { filter: brightness(1.07); }
+  .foot button:disabled { opacity: .45; cursor: not-allowed; }
+  svg { flex: none; }
+
+  /* ---------- fidelity report ---------- */
+  .audit { border-top: 1px solid var(--line); background: var(--bg); flex: none;
+           max-height: 200px; overflow-y: auto; }
+  .ahead { display: flex; align-items: center; gap: 10px; padding: 11px 14px; }
+  .ring { width: 44px; height: 44px; flex: none; position: relative; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring b { position: absolute; inset: 0; display: grid; place-items: center;
+            font-size: 12px; font-weight: 700; }
+  .averdict { font-weight: 650; font-size: 11.5px; }
+  .asub { font-size: 10px; opacity: .6; margin-top: 1px; }
+  .checks { padding: 0 14px 11px; display: flex; flex-direction: column; gap: 5px; }
+  .chk { display: flex; align-items: flex-start; gap: 7px; font-size: 10px; }
+  .chk .m { width: 13px; height: 13px; border-radius: 50%; flex: none; display: grid;
+            place-items: center; margin-top: 1px; }
+  .chk.ok .m { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .chk.no .m { background: color-mix(in srgb, #e5484d 16%, transparent); color: #e5484d; }
+  .chk .t { font-weight: 600; }
+  .chk .d { opacity: .55; }
+
+  /* ---------- AI settings ---------- */
+  .ai { margin-top: 14px; padding: 11px 12px; border-radius: var(--radius);
+        background: var(--bg-2); border: 1px solid var(--line); }
+  .ai .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .ai .hd b { font-size: 11px; font-weight: 650; display: flex; align-items: center; gap: 6px; }
+  .ai .st { font-size: 9.5px; font-weight: 650; padding: 2px 7px; border-radius: 20px;
+            background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  .ai .st.on { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  .ai .keyrow { display: flex; gap: 6px; margin-top: 8px; }
+  .ai input[type=password], .ai input[type=text] { flex: 1; min-width: 0; padding: 7px 9px; border-radius: 7px;
+       border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; font-size: 10.5px; }
+  .ai .keyrow button { padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line);
+       background: var(--bg); color: var(--ink); font: inherit; font-size: 10.5px; font-weight: 620; cursor: pointer; }
+  .ai .keyrow button:hover { background: var(--bg-2); }
+  .ai .hint { font-size: 9.5px; opacity: .6; margin-top: 6px; line-height: 1.45; }
+  .ai .opts { display: flex; gap: 14px; margin-top: 8px; }
+  .ai .opts label { display: flex; align-items: center; gap: 5px; font-size: 10px; cursor: pointer; }
+  .plan { padding: 0 14px 11px; }
+  .plan .ph { font-size: 10px; font-weight: 650; opacity: .7; margin: 4px 0 6px; text-transform: uppercase; letter-spacing: .4px; }
+  .plan .ps { display: flex; align-items: center; gap: 6px; font-size: 10px; padding: 2px 0; }
+  .plan .ps .c { width: 34px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; flex: none; }
+  .plan .ps .c i { display: block; height: 100%; background: var(--ok); }
+  .plan .ps .c.low i { background: var(--warn); }
+  .plan .ps .n { opacity: .55; }
+  .plan .notes { font-size: 10px; opacity: .7; margin-top: 6px; line-height: 1.45; }
+  .plan .aierr { font-size: 10px; color: var(--warn); margin-top: 6px; font-weight: 600; }
+</style>
+
+<div class="top">
+  <div class="logo">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+  </div>
+  <div>
+    <h1>Figma to Code</h1>
+    <div class="sub">HTML · CSS · JSX · Specs · Assets</div>
+  </div>
+</div>
+
+<div class="pad" id="setup">
+  <div class="sel" id="sel">
+    <div class="ico" id="selico">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+    </div>
+    <div style="min-width:0">
+      <div class="name">No selection</div>
+      <div class="dim">Select a Frame, Component, or Group</div>
+    </div>
+  </div>
+
+  <span class="lbl">Output format</span>
+  <div class="seg">
+    <label><input type="radio" name="fmt" value="html" checked><span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>HTML</span></label>
+    <label><input type="radio" name="fmt" value="jsx"><span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2.2"/><ellipse cx="12" cy="12" rx="10" ry="4.4"/><ellipse cx="12" cy="12" rx="10" ry="4.4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4.4" transform="rotate(120 12 12)"/></svg>JSX</span></label>
+  </div>
+
+  <div class="ai" id="ai">
+    <div class="hd">
+      <b><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>AI layout planner</b>
+      <span class="st" id="aist">Off</span>
+    </div>
+    <div class="seg" style="margin-top:8px" id="provseg">
+      <label><input type="radio" name="prov" value="anthropic" checked><span>Anthropic API</span></label>
+      <label><input type="radio" name="prov" value="openrouter"><span>OpenRouter</span></label>
+    </div>
+    <div class="keyrow">
+      <input type="password" id="apikey" placeholder="Anthropic API key (sk-ant-…)" autocomplete="off" spellcheck="false">
+      <button id="savekey">Save</button>
+    </div>
+    <div class="hint" id="aihint">The planner reads the layer tree and screenshots, decides sections, grids and overlays, then verifies the render and corrects itself. Code still reads every measurement from Figma.</div>
+    <div class="opts">
+      <label><input type="checkbox" id="replan"> Re-plan (ignore cached plan)</label>
+      <label><input type="checkbox" id="noverify"> Skip verification round</label>
+    </div>
+  </div>
+
+  <button class="primary" id="go" disabled>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5L13 3z"/></svg>
+    Generate Code
+  </button>
+  <div class="bar" id="bar"><i id="fill"></i></div>
+  <div class="msg" id="msg"></div>
+</div>
+
+<div id="result">
+  <div class="tabs" id="tabs"></div>
+  <div class="codewrap">
+    <button class="copy" id="copy">
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      Copy
+    </button>
+    <pre id="code"></pre>
+  </div>
+  <div class="pvbar" id="pvbar">
+    <div class="pvleft">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+      <b>Live Preview</b>
+      <span class="score" id="score"></span>
+    </div>
+    <span class="chev" id="chev">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </span>
+  </div>
+  <div id="preview"><iframe id="frame" sandbox="allow-same-origin"></iframe></div>
+  <div class="audit" id="audit" style="display:none">
+    <div class="ahead">
+      <div class="ring">
+        <svg width="44" height="44" viewBox="0 0 44 44">
+          <circle cx="22" cy="22" r="18" fill="none" stroke="var(--line)" stroke-width="4"/>
+          <circle id="ringfg" cx="22" cy="22" r="18" fill="none" stroke="var(--ok)"
+                  stroke-width="4" stroke-linecap="round"
+                  stroke-dasharray="113" stroke-dashoffset="113"/>
+        </svg>
+        <b id="ringnum">—</b>
+      </div>
+      <div style="min-width:0">
+        <div class="averdict" id="averdict">Checking…</div>
+        <div class="asub" id="asub">Measuring the rendered page</div>
+      </div>
+    </div>
+    <div class="checks" id="checks"></div>
+    <div class="plan" id="plan" style="display:none"></div>
+  </div>
+
+  <div class="foot">
+    <button id="back">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      New
+    </button>
+    <button class="dl" id="dl">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download ZIP
+    </button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ready = false, FILES = {}, CUR = "", ZIP = null, ZIPNAME = "", PV = null;
+let LAST_SEL = null, STATS = null, AUDIT = null, PLAN = null, AI = null, MEASURED = null;
+let API_KEY = "", MODEL = "claude-opus-5", PROVIDER = "anthropic", KEYS = {}, MODELS = {};
+
+// The UI iframe is torn down and rebuilt by Figma on some interactions, which
+// wipes all JS state. Persist the generated result so a reload restores it
+// instead of throwing the work away.
+function save() {
+  try {
+    sessionStorage.setItem("fhj", JSON.stringify({
+      files: FILES, preview: PV, stats: STATS, name: ZIPNAME, audit: AUDIT,
+      plan: PLAN, ai: AI, measured: MEASURED
+    }));
+  } catch (e) { /* quota or unavailable — non-fatal */ }
+}
+function restore() {
+  try {
+    const raw = sessionStorage.getItem("fhj");
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || !d.files || !Object.keys(d.files).length) return false;
+    FILES = d.files; PV = d.preview; STATS = d.stats; ZIPNAME = d.name || "export.zip";
+    AUDIT = d.audit || null; PLAN = d.plan || null; AI = d.ai || null; MEASURED = d.measured || null;
+    renderResult();
+    return true;
+  } catch (e) { return false; }
+}
+
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+function hi(code, kind) {
+  let h = esc(code);
+  if (kind === "css") {
+    h = h.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="com">$1</span>')
+         .replace(/^([^\{\}\n]+)(\{)/gm, '<span class="sel2">$1</span>$2')
+         .replace(/([a-z-]+)(\s*:\s*)([^;\n]+)/g, '<span class="prop">$1</span>$2<span class="val">$3</span>');
+  } else if (kind === "json") {
+    h = h.replace(/"([^"]+)"(\s*:)/g, '<span class="att">"$1"</span>$2')
+         .replace(/:\s*"([^"]*)"/g, ': <span class="val">"$1"</span>')
+         .replace(/:\s*(\d+\.?\d*)/g, ': <span class="num">$1</span>');
+  } else {
+    // Tokenise in ONE pass. Sequential replaces re-matched their own output
+    // and injected markup into the visible text.
+    h = h.replace(/(&lt;\/?[a-zA-Z][\w-]*)|([a-zA-Z-]+=)(&quot;[^&]*?&quot;)/g,
+      (m, tag, attr, val) => {
+        if (tag) {
+          const lt = tag.slice(0, tag.indexOf("t") > 0 && tag[4] === "/" ? 5 : 4);
+          return lt + '<span class="tag">' + tag.slice(lt.length) + '</span>';
+        }
+        return '<span class="att">' + attr + '</span><span class="val">' + val + '</span>';
+      });
+  }
+  return h;
+}
+const kindOf = (n) => n.endsWith(".css") ? "css" : n.endsWith(".json") ? "json" : "html";
+
+function showFile(name) {
+  CUR = name;
+  $("code").innerHTML = hi(FILES[name] || "", kindOf(name));
+  [...$("tabs").children].forEach(t => t.classList.toggle("on", t.dataset.f === name));
+  $("codewrap") && ($("code").parentElement.scrollTop = 0);
+}
+
+onmessage = (e) => {
+  const m = e.data.pluginMessage; if (!m) return;
+
+  if (m.type === "selection") {
+    ready = m.ok; $("go").disabled = !m.ok;
+    // Results are showing: just remember the new selection. Re-rendering the
+    // setup panel here is what made generated code vanish mid-review.
+    if ($("result").style.display === "flex") { LAST_SEL = m; return; }
+    const el = $("sel");
+    const ico = el.querySelector(".ico").outerHTML;
+    if (m.ok) {
+      el.className = "sel";
+      el.innerHTML = ico + '<div style="min-width:0"><div class="name">'+m.name+
+        '</div><div class="dim">'+m.width+' × '+m.height+' px</div></div>';
+    } else {
+      el.className = "sel bad";
+      const why = m.count === 0 ? "Nothing selected"
+        : m.count > 1 ? m.count+" layers selected"
+        : "Unsupported type: "+m.nodeType;
+      const hint = m.count > 1 ? "Select just one layer"
+        : "Select a Frame, Component, or Group";
+      el.innerHTML = ico + '<div style="min-width:0"><div class="name">'+why+
+        '</div><div class="dim">'+hint+'</div></div>';
+    }
+  }
+
+  if (m.type === "config") {
+    API_KEY = m.key || ""; MODEL = m.model || MODEL; PROVIDER = m.provider || "anthropic";
+    KEYS = m.keys || {}; MODELS = m.models || {};
+    const r = document.querySelector('input[name=prov][value="' + PROVIDER + '"]'); if (r) r.checked = true;
+    $("apikey").value = API_KEY;
+    $("apikey").placeholder = PROVIDER === "openrouter" ? "OpenRouter API key (sk-or-…)" : "Anthropic API key (sk-ant-…)";
+    const st = $("aist");
+    st.textContent = m.hasKey ? "On · " + MODEL : "Off";
+    st.className = "st" + (m.hasKey ? " on" : "");
+    $("aihint").textContent = m.hasKey
+      ? "Plans with " + MODEL + (PROVIDER === "openrouter" ? " via OpenRouter" : "") + ", builds, measures the render, then asks the model to correct the plan once. Expect 1–3 minutes on a long page."
+      : "Add a" + (PROVIDER === "openrouter" ? "n OpenRouter" : "n Anthropic") + " API key to enable AI planning. Without it the plugin falls back to name/geometry heuristics.";
+  }
+
+  if (m.type === "ai-request") { handleAIRequest(m); }
+  if (m.type === "measure") {
+    measurePreview(m.preview, m.expect, (measured) => {
+      parent.postMessage({ pluginMessage: { type: "measured", reqId: m.reqId, measured } }, "*");
+    });
+  }
+
+  if (m.type === "progress") {
+    $("bar").style.display = "block"; $("fill").style.width = m.pct+"%";
+    $("msg").textContent = m.message; $("msg").className = "msg";
+    clearInterval(window.__tick);
+    if (/Planning|Refining/.test(m.message)) {
+      const t0 = Date.now(), base = m.message;
+      window.__tick = setInterval(() => { $("msg").textContent = base + " " + Math.round((Date.now() - t0) / 1000) + "s"; }, 1000);
+    }
+  }
+
+  if (m.type === "error") {
+    clearInterval(window.__tick);
+    $("bar").style.display = "none";
+    $("msg").textContent = m.message; $("msg").className = "msg err";
+    $("go").disabled = !ready;
+  }
+
+  if (m.type === "done") {
+    clearInterval(window.__tick);
+    ZIP = m.bytes; ZIPNAME = m.filename; FILES = m.files || {}; PV = m.preview;
+    AUDIT = m.audit || null; PLAN = m.plan || null; AI = m.ai || null; MEASURED = m.measured || null;
+    STATS = m.stats;
+    save();
+    renderResult();
+  }
+};
+
+/* ------------------------------------------------------------ AI bridge */
+
+// Slice the full-page screenshot into strips the model can read at native
+// resolution, then call the Claude API. The plugin sandbox cannot do either.
+async function sliceScreenshot(bytes, scale, canvasW, canvasH) {
+  const blob = new Blob([bytes], { type: "image/png" });
+  const bmp = await createImageBitmap(blob);
+  const STRIP = 2400;                       // px in the screenshot's own scale
+  const strips = [];
+  const n = Math.ceil(bmp.height / STRIP);
+  for (let i = 0; i < n; i++) {
+    const y0 = i * STRIP, h = Math.min(STRIP, bmp.height - y0);
+    const c = document.createElement("canvas");
+    c.width = bmp.width; c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, y0, bmp.width, h, 0, 0, bmp.width, h);
+    const dataUrl = c.toDataURL("image/jpeg", 0.85);
+    strips.push({
+      data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+      fromY: Math.round(y0 / scale), toY: Math.round((y0 + h) / scale),
+      index: i + 1, count: n,
+    });
+  }
+  bmp.close && bmp.close();
+  return strips;
+}
+
+function withTimeout(ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return { signal: ctrl.signal, clear: () => clearTimeout(timer) };
+}
+
+/** Anthropic Messages API, called directly from the plugin iframe. */
+async function callAnthropic(body, followUp) {
+  const req = JSON.parse(JSON.stringify(body));
+  if (followUp) {
+    req.messages.push({ role: "assistant", content: followUp.assistant });
+    req.messages.push({ role: "user", content: followUp.user });
+  }
+  const t = withTimeout(9 * 60 * 1000);
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST", signal: t.signal,
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "server-side-fallback-2026-07-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify(req),
+  });
+  t.clear();
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const why = data && data.error && data.error.message ? data.error.message : ("HTTP " + resp.status);
+    throw new Error("Claude API: " + why);
+  }
+  if (data.stop_reason === "refusal") throw new Error("Claude declined the request (refusal)");
+  if (data.stop_reason === "max_tokens") throw new Error("Plan was cut off (max_tokens) — try again");
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  return { text, usage: data.usage };
+}
+
+/**
+ * OpenRouter speaks the OpenAI chat format. Convert: system → system message,
+ * Anthropic image blocks → image_url data URLs, output_config.format →
+ * response_format.json_schema, and pin routing to providers that honour it.
+ */
+function toOpenRouterBody(body, followUp) {
+  const model = MODELS.openrouter || ("anthropic/" + body.model);
+  const conv = (content) => typeof content === "string" ? content : content.map(b => {
+    if (b.type === "image") return { type: "image_url", image_url: { url: "data:" + b.source.media_type + ";base64," + b.source.data } };
+    return { type: "text", text: b.text };
+  });
+  const messages = [{ role: "system", content: body.system }];
+  for (const m of body.messages) messages.push({ role: m.role, content: conv(m.content) });
+  if (followUp) {
+    messages.push({ role: "assistant", content: followUp.assistant });
+    messages.push({ role: "user", content: followUp.user });
+  }
+  const out = { model, max_tokens: body.max_tokens, messages };
+  if (body.output_config && body.output_config.format) {
+    out.response_format = { type: "json_schema", json_schema: { name: "layout_plan", strict: true, schema: body.output_config.format.schema } };
+    out.provider = { require_parameters: true };
+  }
+  if (body.output_config && body.output_config.effort) out.reasoning = { effort: body.output_config.effort };
+  return out;
+}
+
+async function callOpenRouter(body, followUp) {
+  let req = toOpenRouterBody(body, followUp);
+  for (let pass = 0; pass < 3; pass++) {
+    const t = withTimeout(9 * 60 * 1000);
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST", signal: t.signal,
+      headers: {
+        "content-type": "application/json",
+        "authorization": "Bearer " + API_KEY,
+        "x-openrouter-title": "Figma to HTML / JSX",
+      },
+      body: JSON.stringify(req),
+    });
+    t.clear();
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || (data && data.error)) {
+      const why = data && data.error && data.error.message ? data.error.message : ("HTTP " + resp.status);
+      // Some routes reject the unified reasoning parameter or the strict
+      // provider pin; drop them one at a time before giving up.
+      const paramIssue = /reasoning|parameter|endpoint|provider|not support/i.test(why);
+      if (pass === 0 && paramIssue && req.reasoning) { delete req.reasoning; console.warn("OpenRouter retry without reasoning:", why); continue; }
+      if (pass <= 1 && paramIssue && req.provider) { delete req.provider; console.warn("OpenRouter retry without provider pin:", why); continue; }
+      throw new Error("OpenRouter: " + why);
+    }
+    const ch = data.choices && data.choices[0];
+    if (!ch) throw new Error("OpenRouter: empty response");
+    if (ch.finish_reason === "length") throw new Error("Plan was cut off (length) — try again");
+    if (ch.message && ch.message.refusal) throw new Error("Model declined the request");
+    const c = ch.message ? ch.message.content : "";
+    const text = typeof c === "string" ? c : (c || []).map(p => p.text || "").join("");
+    return { text, usage: data.usage };
+  }
+  throw new Error("OpenRouter: request failed");
+}
+
+/** Minimal JSON-schema check: type, required, additionalProperties, enum, items. */
+function validateSchema(schema, v, path) {
+  const errs = [];
+  const t = schema.type;
+  const typeOk = t === "object" ? (v && typeof v === "object" && !Array.isArray(v))
+    : t === "array" ? Array.isArray(v)
+    : t === "integer" ? Number.isInteger(v)
+    : t === "number" ? typeof v === "number"
+    : t === "string" ? typeof v === "string"
+    : t === "boolean" ? typeof v === "boolean" : true;
+  if (!typeOk) return [path + " should be " + t];
+  if (schema.enum && !schema.enum.includes(v)) errs.push(path + " must be one of " + schema.enum.join("|"));
+  if (t === "object") {
+    for (const k of schema.required || []) if (!(k in v)) errs.push(path + " missing " + k);
+    for (const k in v) {
+      if (schema.properties && schema.properties[k]) errs.push(...validateSchema(schema.properties[k], v[k], path + "." + k));
+      else if (schema.additionalProperties === false) errs.push(path + " has unknown key " + k);
+    }
+  }
+  if (t === "array" && schema.items) v.forEach((it, i) => errs.push(...validateSchema(schema.items, it, path + "[" + i + "]")));
+  return errs;
+}
+
+async function handleAIRequest(m) {
+  const reply = (r) => parent.postMessage({ pluginMessage: { type: "ai-response", reqId: m.reqId, ...r } }, "*");
+  const t0 = Date.now();
+  try {
+    if (!API_KEY) throw new Error("No API key saved");
+    const body = m.body;
+    const content = body.messages[0].content;
+    if (m.screenshot) {
+      const strips = await sliceScreenshot(m.screenshot, m.scale, m.canvasWidth, m.canvasHeight);
+      const blocks = [];
+      for (const s of strips) {
+        blocks.push({ type: "text", text: "Strip " + s.index + " of " + s.count + " — design y " + s.fromY + " to " + s.toY + " px:" });
+        blocks.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: s.data } });
+      }
+      body.messages[0].content = blocks.concat(content);   // images first, then the outline
+    }
+    const schema = body.output_config && body.output_config.format ? body.output_config.format.schema : null;
+    let attempt = 0, json = null, usage = null, lastErrors = null, followUp = null;
+    // Structured outputs make bad JSON rare; still validate, and give the model
+    // one chance to fix its own output before falling back to heuristics.
+    while (attempt < 2) {
+      attempt++;
+      const data = PROVIDER === "openrouter"
+        ? await callOpenRouter(body, followUp)
+        : await callAnthropic(body, followUp);
+      usage = data.usage || null;
+      const text = data.text;
+      try { json = JSON.parse(text); }
+      catch (e) { lastErrors = ["response was not valid JSON"]; json = null; }
+      if (json && schema) {
+        const errs = validateSchema(schema, json, "$");
+        if (errs.length) { lastErrors = errs; json = null; }
+      }
+      if (json) break;
+      followUp = { assistant: text.slice(0, 20000),
+        user: "That JSON failed validation:\n- " + lastErrors.slice(0, 12).join("\n- ") +
+              "\nReturn the complete corrected plan JSON only." };
+    }
+    if (!json) throw new Error("Planner output failed validation: " + (lastErrors || ["unknown"]).slice(0, 3).join("; "));
+    console.log("[ai-planner] " + m.kind + " ok in " + Math.round((Date.now() - t0) / 1000) + "s", usage);
+    reply({ ok: true, json, usage, ms: Date.now() - t0 });
+  } catch (e) {
+    console.error("[ai-planner] " + m.kind + " failed:", e);
+    reply({ ok: false, error: e && e.message ? e.message : String(e), ms: Date.now() - t0 });
+  }
+}
+
+/**
+ * Render the page OFF-SCREEN at its true canvas width and measure it — the
+ * same check a reviewer does by hand. Used both for the fidelity report and
+ * to feed the AI refinement round with real numbers.
+ */
+function measurePreview(pv, expect, cb) {
+  if (!pv || !expect) return cb(null);
+  const probe = document.createElement("iframe");
+  probe.style.cssText = "position:absolute;left:-99999px;top:0;width:" +
+    expect.canvasWidth + "px;height:800px;border:0;visibility:hidden";
+  probe.setAttribute("sandbox", "allow-same-origin");
+  document.body.appendChild(probe);
+  probe.srcdoc = '<!DOCTYPE html><html><head><style>' + pv.css +
+    '</style></head><body>' + pv.html.replace(/<link[^>]*>/g, "") + '</body></html>';
+
+  let done = false;
+  const finish = (measured) => {
+    if (done) return; done = true;
+    try { probe.remove(); } catch (e) {}
+    cb(measured);
+  };
+  const attempt = () => {
+    if (done) return;
+    try {
+      const d = probe.contentDocument;
+      if (!d || !d.body) return finish(null);
+      const cw = expect.canvasWidth;
+      const docH = Math.max(d.documentElement.scrollHeight, d.body.scrollHeight);
+      let overflow = 0; const offenders = [];
+      d.querySelectorAll("*").forEach(el => {
+        const r = el.getBoundingClientRect();
+        if (r.right > cw + 1 && r.width > 0) {
+          overflow++;
+          if (offenders.length < 12) offenders.push((el.getAttribute("class") || el.tagName.toLowerCase()) + " " + Math.round(r.width) + "px");
+        }
+      });
+      const imgs = Array.from(d.images || []);
+      const broken = imgs.filter(i => i.complete && i.naturalWidth === 0).length;
+      const roots = Array.from(d.querySelectorAll(".page-root > *"));
+      const deltas = expect.sections.map((sec, i) => {
+        const el = roots[i];
+        const actual = el ? Math.round(el.getBoundingClientRect().height) : 0;
+        return { slug: sec.slug, expected: sec.height, actual, delta: actual - sec.height };
+      });
+      // Structure summary: first-level children of each section with their
+      // layout mode and box, so the model can see WHY a height is off.
+      const structure = expect.sections.map((sec, i) => {
+        const el = roots[i]; if (!el) return sec.slug + ": (missing)";
+        const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+        const kids = Array.from(el.children).slice(0, 12).map(k => {
+          const r = k.getBoundingClientRect(); const ks = k.ownerDocument.defaultView.getComputedStyle(k);
+          const lay = ks.display === "grid" ? "grid" : ks.display === "flex" ? "flex-" + ks.flexDirection : ks.position === "absolute" ? "abs" : ks.display;
+          return k.tagName.toLowerCase() + "." + (k.getAttribute("class") || "").split(" ")[0] + "[" + lay + " " + Math.round(r.width) + "x" + Math.round(r.height) + "]";
+        });
+        const lay = cs.display === "grid" ? "grid" : cs.display === "flex" ? "flex-" + cs.flexDirection : cs.display;
+        return sec.slug + " (" + lay + ", " + Math.round(el.getBoundingClientRect().height) + "px, " + el.children.length + " children): " + kids.join(" ");
+      });
+      finish({
+        docHeight: docH, expectedHeight: expect.canvasHeight, heightDelta: docH - expect.canvasHeight,
+        overflowCount: overflow, brokenImages: broken, sectionDeltas: deltas,
+        structure, overflowing: offenders
+      });
+    } catch (e) { finish(null); }
+  };
+  probe.onload = () => setTimeout(attempt, 900);
+  setTimeout(attempt, 3000);   // fallback if onload never fires
+}
+
+function runAudit() {
+  if (!AUDIT || !PV) return;
+  $("audit").style.display = "block";
+  if (MEASURED) return paintAudit(MEASURED);   // already measured by the pipeline
+  measurePreview(PV, AUDIT.expect, paintAudit);
+}
+
+function paintAudit(measured) {
+  const checks = AUDIT.checks.slice();
+  if (AI) {
+    checks.unshift({
+      id: "ai", label: "AI layout plan", weight: 0, pass: !!AI.used,
+      detail: AI.used
+        ? (AI.model || MODEL) + (AI.cached ? " (cached plan)" : "") + (AI.refined ? ", refined" : "")
+        : (AI.error ? "FAILED: " + AI.error : "no API key saved — heuristics only")
+    });
+  }
+  if (measured) {
+    const pct = measured.expectedHeight
+      ? Math.abs(measured.heightDelta) / measured.expectedHeight : 1;
+    checks.push({
+      id: "height", label: "Height matches Figma", weight: 0,
+      pass: pct <= 0.02,
+      detail: measured.docHeight + "px vs " + measured.expectedHeight + "px (" +
+        (measured.heightDelta > 0 ? "+" : "") + measured.heightDelta + ")"
+    });
+    checks.push({
+      id: "hoverflow", label: "No horizontal overflow", weight: 0,
+      pass: measured.overflowCount === 0,
+      detail: measured.overflowCount === 0 ? "nothing past the canvas"
+        : measured.overflowCount + " elements overflow"
+    });
+    const worst = measured.sectionDeltas
+      .filter(d => Math.abs(d.delta) > 8)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+    if (worst.length) {
+      checks.push({
+        id: "sections", label: "Section heights", weight: 0, pass: false,
+        detail: worst.slice(0, 3).map(d =>
+          d.slug + " " + (d.delta > 0 ? "+" : "") + d.delta + "px").join(", ")
+      });
+    } else {
+      checks.push({ id:"sections", label:"Section heights", weight:0, pass:true,
+        detail: "all within 8px" });
+    }
+  }
+
+  const score = measured ? scoreWith(measured) : AUDIT.baseScore;
+  const ring = $("ringfg"), C = 113;
+  ring.style.strokeDashoffset = String(C - (C * score) / 100);
+  ring.style.stroke = score >= 90 ? "var(--ok)" : score >= 70 ? "var(--warn)" : "#e5484d";
+  $("ringnum").textContent = String(score);
+
+  const failed = checks.filter(c => !c.pass).length;
+  $("averdict").textContent = score >= 90 ? "Looks accurate"
+    : score >= 70 ? "Close, with issues" : "Needs attention";
+  $("asub").textContent = failed === 0 ? "All checks passed"
+    : failed + " check" + (failed > 1 ? "s" : "") + " to review";
+
+  $("checks").innerHTML = checks.map(c =>
+    '<div class="chk ' + (c.pass ? "ok" : "no") + '"><span class="m">' +
+    (c.pass
+      ? '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      : '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>') +
+    '</span><span><span class="t">' + c.label + '</span> <span class="d">' + c.detail + '</span></span></div>'
+  ).join("");
+  paintPlan();
+}
+
+function paintPlan() {
+  const el = $("plan");
+  if (!AI) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  let h = '<div class="ph">AI layout plan · ' + (AI.used
+    ? (AI.model || MODEL) + (AI.cached ? " · cached" : (AI.planMs ? " · " + (AI.planMs / 1000).toFixed(0) + "s" : "")) +
+      (AI.refined ? " · refined" + (AI.refineMs ? " " + (AI.refineMs / 1000).toFixed(0) + "s" : "") : "")
+    : "not used") + '</div>';
+  if (PLAN && PLAN.sections) {
+    h += PLAN.sections.map(s => {
+      const pct = Math.round((s.confidence || 0) * 100);
+      return '<div class="ps"><span class="c' + (pct < 70 ? " low" : "") + '"><i style="width:' + pct + '%"></i></span>' +
+        '<span>' + esc(s.slug) + '</span>' + (s.note ? '<span class="n">' + esc(s.note) + '</span>' : '') + '</div>';
+    }).join("");
+    h += '<div class="notes">' + PLAN.containers + ' layout overrides · ' + PLAN.decorations + ' rasterised decorations' +
+         (PLAN.notes ? '<br>' + esc(PLAN.notes) : '') + '</div>';
+  }
+  if (AI.error) h += '<div class="aierr">' + esc(AI.error) + '</div>';
+  el.innerHTML = h;
+}
+
+function scoreWith(m) {
+  let got = 0, total = 0;
+  for (const c of AUDIT.checks) { total += c.weight; if (c.pass) got += c.weight; }
+  total += 25;
+  const pct = m.expectedHeight ? Math.abs(m.heightDelta) / m.expectedHeight : 1;
+  let v = pct <= 0.02 ? 25 : pct <= 0.05 ? 20 : pct <= 0.10 ? 14 : pct <= 0.20 ? 7 : 0;
+  if (m.overflowCount > 0) v = Math.max(0, v - 8);
+  if (m.brokenImages > 0) v = Math.max(0, v - 5);
+  got += v;
+  return Math.round((got / total) * 100);
+}
+
+function renderResult() {
+  $("setup").style.display = "none";
+  $("result").style.display = "flex";
+  const names = Object.keys(FILES).filter(n => FILES[n]);
+  $("tabs").innerHTML = names.map(n => '<div class="tab" data-f="'+n+'">'+n+'</div>').join("");
+  [...$("tabs").children].forEach(t => t.onclick = () => showFile(t.dataset.f));
+  if (names.length) showFile(CUR && FILES[CUR] ? CUR : names[0]);
+  const s = STATS;
+  if (s) {
+    $("score").textContent = s.sections+" sections · "+s.rules+" rules · "+s.images+
+      " images"+(s.videos?" · "+s.videos+" video":"")+" · "+s.elapsed+"s";
+  }
+  // A restored session has no ZIP bytes (they are not serialisable); the code
+  // and preview survive, so say so rather than downloading an empty file.
+  $("dl").textContent = ZIP ? "Download ZIP" : "Re-generate to download";
+  $("dl").disabled = !ZIP;
+  runAudit();
+}
+
+// Restore a previous result if the iframe was reloaded mid-review.
+restore();
+
+$("go").onclick = () => {
+  const fmt = document.querySelector('input[name=fmt]:checked').value;
+  $("go").disabled = true; $("msg").textContent = "";
+  parent.postMessage({ pluginMessage: {
+    type: "export", format: fmt,
+    forceReplan: $("replan").checked, noVerify: $("noverify").checked
+  } }, "*");
+};
+
+$("savekey").onclick = () => {
+  parent.postMessage({ pluginMessage: { type: "set-key", provider: PROVIDER, key: $("apikey").value } }, "*");
+};
+document.querySelectorAll('input[name=prov]').forEach(r => r.onchange = () => {
+  PROVIDER = r.value;
+  $("apikey").value = KEYS[PROVIDER] || "";
+  $("apikey").placeholder = PROVIDER === "openrouter" ? "OpenRouter API key (sk-or-…)" : "Anthropic API key (sk-ant-…)";
+  parent.postMessage({ pluginMessage: { type: "set-provider", provider: PROVIDER } }, "*");
+});
+$("apikey").onkeydown = (e) => { if (e.key === "Enter") $("savekey").onclick(); };
+
+$("copy").onclick = () => {
+  const ta = document.createElement("textarea");
+  ta.value = FILES[CUR] || ""; document.body.appendChild(ta); ta.select();
+  document.execCommand("copy"); ta.remove();
+  const btn = $("copy"), html = btn.innerHTML;
+  btn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Copied';
+  setTimeout(() => { btn.innerHTML = html; }, 1300);
+};
+
+$("pvbar").onclick = () => {
+  const p = $("preview"), open = p.style.display === "block";
+  p.style.display = open ? "none" : "block";
+  $("chev").className = "chev" + (open ? "" : " open");
+  if (!open && PV) {
+    const doc = '<!DOCTYPE html><html><head><style>'+PV.css+
+      '\nhtml,body{margin:0}.page-root{transform-origin:top left}</style></head><body>'+
+      PV.html.replace(/<link[^>]*>/g,"")+'</body></html>';
+    const f = $("frame");
+    const W = PV.width || 1920;
+    const scale = f.clientWidth / W;
+    // Render the page at its REAL width inside a wrapper, then scale the whole
+    // wrapper down. Scaling .page-root alone leaves the body at iframe width,
+    // which is what squashed the preview into a strip.
+    const shell = '<div id="pv-shell" style="width:'+W+'px;transform:scale('+scale+
+      ');transform-origin:top left">';
+    const doc2 = doc.replace("<body>", "<body>"+shell).replace("</body>", "</div></body>");
+    f.srcdoc = doc2;
+  }
+};
+
+$("back").onclick = () => {
+  try { sessionStorage.removeItem("fhj"); } catch(e){}
+  FILES = {}; PV = null; STATS = null; ZIP = null; CUR = ""; AUDIT = null; PLAN = null; AI = null; MEASURED = null;
+  $("audit").style.display = "none"; $("plan").style.display = "none";
+  $("result").style.display = "none"; $("setup").style.display = "block";
+  $("bar").style.display = "none"; $("msg").textContent = ""; $("go").disabled = !ready;
+};
+
+$("dl").onclick = () => {
+  if (!ZIP) return;
+  const blob = new Blob([ZIP], { type: "application/zip" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = ZIPNAME; a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>

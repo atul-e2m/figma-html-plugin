@@ -1,0 +1,31 @@
+# dependencies / builds
+node_modules/
+code.js
+v2/plugin/code.js
+dist/
+
+# secrets
+.env
+.env.*
+!.env.example
+v2/.env
+
+# trial designs: exported bundles, zips, generated sites, sheets
+*.zip
+*.xlsx
+*-ir/
+*-ir-*/
+edward-*/
+home-page-*/
+july-ir/
+pd-multi-*/
+Test runs/
+discover figma/
+v2 tests/
+out/
+.plan-cache/
+
+# os / tooling
+.DS_Store
+.dev-report/
+__pycache__/

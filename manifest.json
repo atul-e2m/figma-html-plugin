@@ -1,0 +1,19 @@
+{
+  "name": "Figma to HTML / JSX",
+  "id": "figma-to-html-jsx-converter",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "https://api.anthropic.com",
+      "https://openrouter.ai"
+    ],
+    "reasoning": "Sends the layer outline and frame screenshots to Claude (Anthropic API, or OpenRouter) to plan the HTML structure."
+  },
+  "documentAccess": "dynamic-page",
+  "capabilities": []
+}
