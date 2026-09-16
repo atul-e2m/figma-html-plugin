@@ -1,13 +1,18 @@
 {
   "compilerOptions": {
-    "target": "es2017",
-    "lib": ["es2017", "dom"],
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2022"],
+    "types": ["node"],
     "strict": true,
-    "typeRoots": ["./node_modules/@types", "./node_modules/@figma"],
-    "moduleResolution": "node",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
     "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true
+    "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/ir/**/*.ts", "src/planner/**/*.ts", "src/compiler/**/*.ts", "src/cli.ts", "test/**/*.ts"]
 }

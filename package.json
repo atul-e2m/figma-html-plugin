@@ -1,14 +1,25 @@
 {
-  "name": "figma-to-html-jsx",
+  "name": "figma-ir-pipeline",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "description": "Figma -> IR (plugin) -> plan (agent) -> HTML/CSS (compiler)",
+  "bin": { "f2h": "./src/cli.ts" },
   "scripts": {
-    "build": "esbuild src/code.ts --bundle --target=es2017 --outfile=code.js",
-    "watch": "esbuild src/code.ts --bundle --target=es2017 --outfile=code.js --watch",
-    "typecheck": "tsc --noEmit"
+    "build:plugin": "esbuild src/plugin/main.ts --bundle --target=es2019 --format=iife --outfile=plugin/code.js",
+    "watch:plugin": "esbuild src/plugin/main.ts --bundle --target=es2019 --format=iife --outfile=plugin/code.js --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.plugin.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "cli": "node src/cli.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "pngjs": "^7.0.0"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.100.2",
+    "@types/node": "^22.10.0",
+    "@types/pngjs": "^6.0.5",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.3"
   }

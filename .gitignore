@@ -1,31 +1,22 @@
 # dependencies / builds
 node_modules/
-code.js
-v2/plugin/code.js
+plugin/code.js
 dist/
 
-# secrets
+# secrets — the CLI reads .env; the plugin never sees it
 .env
 .env.*
 !.env.example
-v2/.env
 
-# trial designs: exported bundles, zips, generated sites, sheets
-*.zip
-*.xlsx
+# local test corpus: exported design bundles, generated sites, zips, result sheets
+v2 tests/
 *-ir/
 *-ir-*/
-edward-*/
-home-page-*/
-july-ir/
-pd-multi-*/
-Test runs/
-discover figma/
-v2 tests/
 out/
 .plan-cache/
+*.zip
+*.xlsx
 
 # os / tooling
 .DS_Store
-.dev-report/
 __pycache__/

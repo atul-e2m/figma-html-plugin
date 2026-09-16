@@ -24,7 +24,7 @@ import type { VerifyMeasurements } from "./planner/prompt.ts";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const log = (m: string) => console.error(`[f2h] ${m}`);
 
-// Keys from v2/.env (OPENROUTER_API_KEY=... / ANTHROPIC_API_KEY=...). Shell env wins.
+// Keys from .env at the repo root (OPENROUTER_API_KEY=... / ANTHROPIC_API_KEY=...). Shell env wins.
 for (const f of [path.join(here, "..", ".env"), path.join(process.cwd(), ".env")]) {
   if (!fs.existsSync(f)) continue;
   for (const line of fs.readFileSync(f, "utf8").split(/\r?\n/)) {
