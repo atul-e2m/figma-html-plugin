@@ -74,6 +74,13 @@ for f in e_opt_in_v4 container nested-elements e_atomic_elements e_classes e_var
   if [ "$(wp option get "elementor_experiment-$f" 2>/dev/null || true)" != "active" ]; then wp option update "elementor_experiment-$f" active >/dev/null && echo "[deploy] enabled experiment $f"; fi
 done
 wp option update elementor_unfiltered_files_upload 1 >/dev/null   # SVG import
+# The template's laptop / tablet_extra / mobile_extra variants only render when the Kit has those
+# breakpoints active (Elementor ships with tablet + mobile only). Same values as the compiler's buckets.
+KIT_ID="$(wp option get elementor_active_kit 2>/dev/null || true)"
+if [ -n "$KIT_ID" ]; then
+  wp eval "\$id=$KIT_ID; \$s=get_post_meta(\$id,'_elementor_page_settings',true); if(!is_array(\$s)) \$s=[]; \$want=['viewport_mobile','viewport_mobile_extra','viewport_tablet','viewport_tablet_extra','viewport_laptop']; \$s['active_breakpoints']=\$want; \$s['viewport_mobile']=767; \$s['viewport_mobile_extra']=880; \$s['viewport_tablet']=1024; \$s['viewport_tablet_extra']=1200; \$s['viewport_laptop']=1366; update_post_meta(\$id,'_elementor_page_settings',\$s); echo 'ok';" >/dev/null && echo "[deploy] kit breakpoints: mobile 767, mobile_extra 880, tablet 1024, tablet_extra 1200, laptop 1366"
+  wp elementor flush-css >/dev/null 2>&1 || true
+fi
 if ! wp eval-file "$HERE/tools/elementor_validate.php" "$OUT/template.json"; then
   echo "[deploy] template has validation errors (see above)"
   if [ "$VALIDATE_ONLY" = 1 ]; then exit 1; fi

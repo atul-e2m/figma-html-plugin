@@ -240,7 +240,7 @@ export async function refinePlan(doc: IRDocument, frame: IRFrame, previous: Plan
 }
 
 
-export interface AuditInput { widths: Record<string, { height: number; overflow: string[]; clipped: string[]; overlapping: string[] }>; screenshots: Record<string, string> }
+export interface AuditInput { widths: Record<string, { height: number; overflow: string[]; clipped: string[]; overlapping: string[]; narrowText?: string[] }>; screenshots: Record<string, string> }
 
 /**
  * Responsive pass: the model sees the design, the baseline renders at tablet and

@@ -1,37 +1,92 @@
 /**
  * Responsive behaviour for a frame that was designed at ONE width.
  *
- * Two layers:
+ * Three layers:
  *  1. Fluid baseline — at the design width nothing changes; below it values
  *     scale instead of overflowing (padding, gaps, offsets, type).
- *  2. Breakpoint transforms — at tablet (≤1023) and phone (≤767) the layout
- *     kinds that cannot shrink are restructured the way a designer would:
- *     overlays stack over their backdrop, rows become columns or wrap, grids
- *     lose columns, fixed heights that hold text open up, images go fluid.
+ *  2. Content-driven restructuring — every row, grid and overlay is given the
+ *     viewport width at which its content stops fitting (from the design boxes
+ *     and the text), and the transform a designer would apply there (rows
+ *     become columns or wrap, grids lose columns, overlays stack over their
+ *     backdrop, fixed heights open up, images go fluid) is emitted under the
+ *     nearest breakpoint bucket ABOVE that width, so it is in force before the
+ *     content breaks. The buckets are Elementor's device set (laptop 1366,
+ *     tablet 1200/1024, mobile 880/767) so both emitters share one ladder.
+ *  3. Stretching — a frame narrower than the viewports it must serve (a 390
+ *     phone frame shown at 700) grows to the viewport instead of sitting as a
+ *     centred column of its design width.
  *
  * The plan can override any transform per node (`responsive` entries); the
- * heuristics here are what runs when it says nothing.
+ * heuristics here are what runs when it says nothing. Hints from a paired
+ * narrower frame (the designer's own phone layout) drive stacking order and
+ * alignment where they exist.
  */
 import type { El, Section } from "./resolve.ts";
 import { hasText } from "./resolve.ts";
 import { px } from "./style.ts";
 
-export const TABLET = "(max-width: 1024px)";
+/* -------------------------------------------------------------- buckets */
+
+/** Breakpoint buckets (max-width), widest first. Elementor: laptop, tablet_extra, tablet, mobile_extra, mobile. */
+export const BUCKETS: readonly number[] = [1366, 1200, 1024, 880, 767];
+export const mq = (w: number) => `(max-width: ${w}px)`;
+export const TABLET = mq(1024);
 /** Portrait tablets: two wide columns no longer fit side by side. */
-export const TABLET_SM = "(max-width: 900px)";
-export const PHONE = "(max-width: 767px)";
+export const TABLET_SM = mq(880);
+export const PHONE = mq(767);
+/** Names the plan uses for the buckets. */
+export const BUCKET_BY_NAME: Record<string, number> = { laptop: 1366, "tablet-lg": 1200, tablet: 1024, "tablet-sm": 880, phone: 767 };
+export type BucketName = "laptop" | "tablet-lg" | "tablet" | "tablet-sm" | "phone";
+export const atQuery = (at: string): string => mq(BUCKET_BY_NAME[at] ?? 767);
+/** Narrowest viewport a bucket must still hold: one above the next bucket, or a small phone. */
+export function bucketFloor(b: number): number { const i = BUCKETS.indexOf(b); return i >= 0 && i + 1 < BUCKETS.length ? BUCKETS[i + 1] + 1 : 320; }
+/**
+ * The query a transform fires under so that it is already in force when the viewport is `breakW`
+ * wide: the smallest bucket at or above `breakW`, below the design width. Content that breaks
+ * above the widest usable bucket is restructured from that bucket down; between the design width
+ * and it the fluid layer and the column shares keep it from overflowing.
+ */
+export function bucketAtOrAbove(breakW: number, W: number): string {
+  const usable = BUCKETS.filter((b) => b < W);
+  if (!usable.length) return mq(W - 1);
+  for (let i = usable.length - 1; i >= 0; i--) if (usable[i] >= breakW) return mq(usable[i]);
+  return mq(usable[0]);
+}
+const queryMax = (q: string): number => parseInt(q.match(/max-width:\s*(\d+)px/)?.[1] || "0", 10);
+/** The wider of two max-width queries (the one that fires first). */
+const widerQ = (a: string, b: string): string => (queryMax(a) >= queryMax(b) ? a : b);
 
 export type ResponsiveAction = "stack" | "wrap" | "hide" | "columns" | "full-width" | "center" | "keep" | "row";
-export interface ResponsiveDecision { at: "tablet" | "phone"; action: ResponsiveAction; columns?: number }
+export interface ResponsiveDecision { at: string; action: ResponsiveAction; columns?: number }
 export type ResponsiveIndex = Map<string, ResponsiveDecision[]>;
+
+/**
+ * What a paired narrower frame (the designer's phone layout) says about nodes of this frame:
+ * the vertical order of matched content, its text alignment, and content the designer dropped.
+ */
+export interface FrameHints {
+  /** node id -> rank in the narrow frame's reading order (smaller = earlier) */
+  order: Map<string, number>;
+  /** text node id -> text-align in the narrow frame */
+  align: Map<string, string>;
+  /** node ids (text-bearing) that have no counterpart in the narrow frame */
+  dropped: Set<string>;
+}
 
 const vw = (v: number, W: number) => `min(${px(v)}, ${Math.round((v / W) * 10000) / 100}vw)`;
 const num = (v: string | undefined): number | null => { if (!v) return null; if (v === "0") return 0; const m = v.match(/^(-?[\d.]+)px$/); return m ? parseFloat(m[1]) : null; };
 /** Column-gap expression of a flex container: the last token, or the whole value when it is a math function (`min(77px, 5.35vw)`). */
 const gapExprOf = (e: El, fallback = "0px"): string => { const g = e.style["gap"]; if (!g) return fallback; return g.includes("(") ? g : g.split(/\s+/).pop() || fallback; };
+/** The design gap in px; a fluid gap `min(123px, 6.41vw)` counts as 123. */
+const gapPx = (e: El): number => { const t = gapExprOf(e); return num(t) ?? parseFloat(t.match(/([\d.]+)px/)?.[1] || "0") ?? 0; };
 const media = (e: El, q: string, st: Record<string, string>) => { e.media[q] = { ...(e.media[q] || {}), ...st }; };
-const decided = (idx: ResponsiveIndex, e: El, at: "tablet" | "phone"): ResponsiveDecision[] => (idx.get(e.id) || []).filter((d) => d.at === at);
-const keep = (idx: ResponsiveIndex, e: El, at: "tablet" | "phone") => decided(idx, e, at).some((d) => d.action === "keep");
+const decided = (idx: ResponsiveIndex, e: El, at: string): ResponsiveDecision[] => (idx.get(e.id) || []).filter((d) => d.at === at);
+/** A `keep` at `at` or any wider bucket freezes the node from that bucket down. */
+const keep = (idx: ResponsiveIndex, e: El, at: string): boolean => {
+  const w = BUCKET_BY_NAME[at] ?? 767;
+  return (idx.get(e.id) || []).some((d) => d.action === "keep" && (BUCKET_BY_NAME[d.at] ?? 767) >= w);
+};
+const textOf = (e: El): string => (e.text ?? (e.runs ? e.runs.map((r) => r.text).join("") : "")).trim();
 /**
  * A layer parked entirely outside its clipping parent (a hover-reveal excerpt
  * or arrow button that slides in) is invisible by design. Once the overlay
@@ -40,6 +95,74 @@ const keep = (idx: ResponsiveIndex, e: El, at: "tablet" | "phone") => decided(id
 const restsOutside = (k: El, e: El): boolean =>
   e.style["overflow"] === "hidden" && k.style["position"] === "absolute" &&
   (k.box.y >= e.box.h - 1 || k.box.x >= e.box.w - 1 || k.box.y + k.box.h <= 1 || k.box.x + k.box.w <= 1);
+
+/**
+ * A container whose children are all placed by coordinates behaves as an absolute composition
+ * whatever the plan called it: a frame without auto-layout (or an HTML import whose boxes
+ * contradict its auto-layout) with a designed height that its content cannot grow.
+ */
+export function absoluteLike(e: El): boolean {
+  if (e.layoutKind === "overlay" || e.layoutKind === "absolute") return true;
+  if (e.isText || !e.children.length) return false;
+  return e.children.every((k) => k.style["position"] === "absolute") && hasText(e);
+}
+
+/* ------------------------------------------------------- content model */
+
+/** Text-ish rows (nav links, tags, buttons, meta) wrap; content rows stack. */
+function textishRow(e: El, kids: El[]): boolean {
+  return e.tag === "nav" || e.tag === "ul" || e.tag === "ol" || kids.every((k) => k.isText || k.tag === "a" || k.tag === "button" || (k.box.h <= 56 && k.box.w <= 260));
+}
+
+/**
+ * The narrowest width a node still reads at, from its design box and content. A label keeps
+ * its line; a paragraph wraps down to its longest word but not below a phone column; a
+ * picture that carries a column shrinks to a third; icons keep their size; a row needs its
+ * children side by side (a wrapping or text row only its widest child). Absolute layers cost 0.
+ */
+export function minWidth(e: El, self = false): number {
+  if (!self && e.style["position"] === "absolute") return 0;
+  const w = e.box.w;
+  if (e.isText) {
+    const fs = num(e.style["font-size"]) ?? 16;
+    const text = textOf(e);
+    const longest = Math.max(1, ...text.split(/\s+/).map((s) => s.length)) * fs * 0.58;
+    const lh = num(e.style["line-height"]) ?? (/^[\d.]+$/.test(e.style["line-height"] || "") ? parseFloat(e.style["line-height"]) * fs : fs * 1.3);
+    const lines = e.box.h / Math.max(1, lh);
+    // A label keeps its line: its own width, which is the glyph run, not the (fill) box it sits in.
+    if (e.style["white-space"] === "nowrap") return w;
+    if (lines < 1.6 && text.length <= 28) return Math.min(w, Math.max(longest, text.length * fs * 0.55));
+    return Math.min(w, Math.max(longest, 240));
+  }
+  const picture = e.tag === "img" || e.tag === "svg" || e.tag === "video" || (e.hasAsset && !hasText(e));
+  if (picture) return w < 120 ? w : Math.min(w, Math.max(w * 0.35, 160));
+  const padX = sidePadding(e.style["padding"]);
+  const kids = e.children.filter((k) => k.style["position"] !== "absolute");
+  if (!kids.length) return Math.min(w, Math.max(w * 0.4, 120));
+  if (absoluteLike(e)) return Math.min(w, Math.max(w * 0.5, 280));
+  if (e.style["display"] === "grid") return Math.max(...kids.map((k) => minWidth(k))) + padX;
+  if (e.style["display"] === "flex" && e.style["flex-direction"] === "row") {
+    if (e.style["flex-wrap"] || textishRow(e, kids)) return Math.max(...kids.map((k) => minWidth(k))) + padX;
+    return kids.reduce((n, k) => n + minWidth(k), 0) + gapPx(e) * (kids.length - 1) + padX;
+  }
+  return Math.max(...kids.map((k) => minWidth(k))) + padX;
+}
+
+/**
+ * Viewport width below which a box of design width `boxW` has less than `need` px. Below the
+ * design width the fluid padding and gaps keep every box a constant share of the viewport, so
+ * the box is `boxW * V / W` wide at viewport `V`. Slightly pessimistic (fixed small paddings
+ * shrink nothing) so the transform fires before, never after, the content breaks.
+ */
+export function breakWidth(boxW: number, need: number, W: number): number {
+  return W * (need / Math.max(1, boxW)) * 1.08;
+}
+
+/** Columns of `cols` cells that fit a grid of design width `gridW` at viewport `V`. */
+function colsAt(gridW: number, itemMin: number, gap: number, cols: number, V: number, W: number): number {
+  const avail = (gridW * V) / W;
+  return Math.max(1, Math.min(cols, Math.floor((avail + gap) / Math.max(1, itemMin + gap))));
+}
 
 /* ------------------------------------------------------------ fluid */
 
@@ -67,9 +190,17 @@ function fluidGap(e: El, W: number): void {
   e.style["gap"] = (parts as number[]).map((v) => (v >= 40 ? vw(v, W) : px(v))).join(" ");
 }
 
-function fluidAbsolute(e: El, W: number): void {
+function fluidAbsolute(e: El, W: number, parent: El | null): void {
   if (e.style["position"] !== "absolute") return;
   const left = num(e.style["left"]), right = num(e.style["right"]);
+  // A band overhanging both edges of the design bleeds to the viewport edges below it.
+  if (left !== null && right !== null && left < 0 && right < 0) { media(e, mq(W - 1), { left: "0", right: "0" }); return; }
+  // A centred box capped at 100% of a padded parent would touch the viewport: keep the parent's side padding.
+  if ((e.style["left"] || "").includes("50%") && e.style["max-width"] === "100%" && parent?.style["padding"]) {
+    const tokens = parent.style["padding"].match(/min\([^)]*\)|[-\d.]+px|0/g) || [];
+    const r = tokens.length >= 4 ? tokens[1] : tokens.length >= 2 ? tokens[1] : tokens[0], l = tokens.length >= 4 ? tokens[3] : r;
+    if (r && l && r !== "0" && l !== "0") e.style["max-width"] = `calc(100% - ${l} - ${r})`;
+  }
   if (left !== null && left >= 40 && right === null) {
     e.style["left"] = vw(left, W);
     e.style["max-width"] = `calc(100% - ${vw(left, W)})`;
@@ -92,95 +223,184 @@ function fluidType(e: El, W: number): void {
 
 /* ------------------------------------------------------ transforms */
 
-function collapseGrid(e: El, idx: ResponsiveIndex): void {
+/** Grids lose columns at the bucket where their cells stop fitting; the plan can pin a count per bucket. */
+function collapseGrid(e: El, idx: ResponsiveIndex, W: number): void {
   const m = e.style["grid-template-columns"]?.match(/^repeat\((\d+), /);
   if (!m) return;
   const cols = parseInt(m[1], 10);
   if (cols <= 1) return;
-  const tCols = decided(idx, e, "tablet").find((d) => d.action === "columns")?.columns;
-  const pCols = decided(idx, e, "phone").find((d) => d.action === "columns")?.columns;
-  const itemW = e.box.w / cols;
-  if (!keep(idx, e, "tablet")) {
-    if (tCols) media(e, TABLET, { "grid-template-columns": `repeat(${tCols}, minmax(0, 1fr))` });
-    else if (cols >= 4) media(e, TABLET, { "grid-template-columns": "repeat(2, minmax(0, 1fr))" });
-    else if (cols === 3 && itemW > 420) media(e, TABLET_SM, { "grid-template-columns": "repeat(2, minmax(0, 1fr))" });
-    // three narrow columns (feature icons, small cards) stay three across on tablets: no orphan row
+  const cells = e.children.filter((c) => c.style["position"] !== "absolute");
+  const itemMin = Math.max(120, ...cells.map((k) => minWidth(k)));
+  const gap = gapPx(e);
+  const gridW = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
+  let prev = cols;
+  for (const b of BUCKETS) {
+    if (b >= W) continue;
+    const name = Object.keys(BUCKET_BY_NAME).find((k) => BUCKET_BY_NAME[k] === b)!;
+    if (keep(idx, e, name)) continue;
+    const forced = decided(idx, e, name).find((d) => d.action === "columns")?.columns;
+    let n = forced || colsAt(gridW, itemMin, gap, cols, bucketFloor(b), W);
+    // An even count never drops to an odd one (4 -> 3 leaves an orphan): 4 -> 2.
+    if (!forced && cols % 2 === 0 && n % 2 === 1 && n < cols && n > 1) n -= 1;
+    if (n < prev) { media(e, mq(b), { "grid-template-columns": `repeat(${n}, minmax(0, 1fr))` }); prev = n; }
   }
-  if (!keep(idx, e, "phone")) media(e, PHONE, { "grid-template-columns": `repeat(${pCols || 1}, minmax(0, 1fr))` });
 }
 
-/** Text-ish rows (nav links, tags, meta) wrap; content rows stack. */
-function rows(e: El, depth: number, idx: ResponsiveIndex, W: number): void {
+/**
+ * Rows. A text-ish row (nav links, tags, buttons) wraps where its items stop fitting. A row of
+ * three or more alike items (cards, counters, logos) behaves as a grid and loses columns bucket
+ * by bucket. A content row (copy beside a picture, two columns) shares the width in
+ * proportion once its designed widths stop fitting, and stacks at the bucket where its
+ * content needs more than the row has.
+ */
+function rows(e: El, idx: ResponsiveIndex, W: number, hints: FrameHints | null): void {
   if (e.style["display"] !== "flex" || e.style["flex-direction"] !== "row") return;
   const kids = e.children.filter((c) => c.style["position"] !== "absolute");
   if (kids.length < 2) return;
-  // The design gap in px; a fluid gap `min(123px, 6.41vw)` counts as 123.
-  const gapToken = e.style["gap"]?.includes("(") ? e.style["gap"] : e.style["gap"]?.split(/\s+/).pop();
-  const gap = num(gapToken) ?? parseFloat((gapToken || "").match(/([\d.]+)px/)?.[1] || "0") ?? 0;
+  const gap = gapPx(e);
   const total = kids.reduce((n, k) => n + k.box.w, 0) + gap * (kids.length - 1);
-  const forced = decided(idx, e, "phone").find((d) => d.action === "stack" || d.action === "wrap" || d.action === "row");
+  const need = minWidth(e, true);
+  const breakW = breakWidth(e.box.w, need, W);
+  const tightW = breakWidth(e.box.w, total + sidePadding(e.style["padding"]), W);
   const tall = Math.max(...kids.map((k) => k.box.h));
-  const textish = e.tag === "nav" || e.tag === "ul" || e.tag === "ol" || kids.every((k) => k.isText || k.tag === "a" || k.tag === "button" || (k.box.h <= 56 && k.box.w <= 260));
-  let action: ResponsiveAction | null = forced ? forced.action : null;
-  if (!action && !keep(idx, e, "phone")) {
-    if (total <= 340 && tall <= 80) action = null;                 // fits a phone as it is
-    else if (textish) action = "wrap";
-    else action = "stack";
+  const textish = textishRow(e, kids);
+  const decisions = idx.get(e.id) || [];
+  const forced = decisions.filter((d) => d.action === "stack" || d.action === "wrap");
+  // A plan decision owns its bucket and every narrower one: no heuristic stacking or wrapping
+  // there (the plan said what happens). Wider buckets still get the heuristics, so a `wrap` at
+  // phone does not leave a tablet unhandled. `row` keeps the children side by side in equal shares.
+  const ownedFrom = Math.max(0, ...decisions.filter((d) => d.action !== "hide" && d.action !== "center" && d.action !== "full-width").map((d) => BUCKET_BY_NAME[d.at] ?? 767));
+  const covered = (q: string) => ownedFrom >= queryMax(q);
+  for (const d of decisions) if (d.action === "row") {
+    const q = atQuery(d.at);
+    media(e, q, { "flex-direction": "row", "flex-wrap": "nowrap" });
+    for (const k of kids) media(k, q, cellStyle(k, "0%", "1 1"));
+    // Kept side by side on a narrow screen: a label wraps inside its cell rather than run out of it.
+    const unwrap = (n: El) => { if (n.isText && n.style["white-space"] === "nowrap") media(n, q, { "white-space": "normal" }); n.children.forEach(unwrap); };
+    kids.forEach(unwrap);
   }
-  const stackAt = (q: string) => stackRow(e, q);
-  if (action === "wrap") media(e, PHONE, { "flex-wrap": "wrap", "row-gap": "12px" });
-  else if (action === "stack") {
-    stackAt(PHONE);
-    // Two or three wide columns cannot share a portrait tablet either.
-    if (!textish && kids.length <= 3 && total > 1000 && !keep(idx, e, "tablet")) stackAt(TABLET_SM);
+  const frozenPhone = keep(idx, e, "phone");
+  const linkCount = (n: El): number => (n.tag === "a" || n.tag === "button" ? 1 : 0) + n.children.reduce((c, k) => c + linkCount(k), 0);
+  // The link list of a header: a <nav>, or (when the <nav> wraps the whole header) the kid that is
+  // a horizontal list of three or more links beside a logo.
+  const navKid = kids.find((k) => k.tag === "nav") || (kids.some((k) => k.hasAsset || k.tag === "img" || k.tag === "svg")
+    ? kids.find((k) => !k.isText && k.box.w > 200 && k.box.h <= 80 && linkCount(k) >= 3 && textishRow(k, k.children.filter((c) => c.style["position"] !== "absolute"))) : undefined);
+  if (navKid && !forced.length && !frozenPhone && !ownedFrom && linkCount(navKid) >= 3) {
+    // Header (logo | links | actions). HTML: the link list becomes a menu behind a button from the
+    // bucket where the row stops fitting (phones at the latest); the emitter builds the toggle.
+    // Elementor (no toggle): the link list drops to its own centred line instead.
+    const q = tightW > BUCKETS[0] * 1.05 && W > BUCKETS[0] ? mq(W - 1) : widerQ(PHONE, bucketAtOrAbove(tightW, W));
+    e.attrs["data-menu-row"] = String(queryMax(q));
+    navKid.attrs["data-menu"] = "1";
+    const firstText = (n: El): El | null => { if (n.isText) return n; for (const c of n.children) { const t = firstText(c); if (t) return t; } return null; };
+    const t = firstText(navKid); if (t && t.style["color"]) e.attrs["data-menu-color"] = t.style["color"];
+    media(e, q, { "flex-wrap": "wrap", "row-gap": "16px" });
+    media(navKid, q, { order: "3", flex: "1 0 100%", "justify-content": "center", "flex-wrap": "wrap" });
+    return;
   }
-  // Tablets: text rows wrap; a 2-3 column content row shares the width instead
-  // of squeezing whichever child has no fixed size.
-  const navKid = kids.find((k) => k.tag === "nav");
-  if (navKid && kids.length >= 3 && total > 700 && !keep(idx, e, "tablet")) {
-    // Header (logo | links | actions): the link list drops to its own centred line.
-    media(e, TABLET_SM, { "flex-wrap": "wrap", "row-gap": "16px" });
-    media(navKid, TABLET_SM, { order: "3", flex: "1 0 100%", "justify-content": "center", "flex-wrap": "wrap" });
-  } else if (!keep(idx, e, "tablet") && total > 800 && !e.style["flex-wrap"]) {
-    if (textish || kids.length >= 4) {
-      media(e, TABLET, { "flex-wrap": "wrap", "row-gap": "16px" });
-      // Four/six small equal items (counters, stats) wrap to a balanced 2-up, not 3 + 1.
-      if (!textish && kids.length % 2 === 0 && kids.every((k) => k.box.h <= 160 && !k.hasAsset)) {
-        const gapExpr = gapExprOf(e);
-        media(e, TABLET_SM, { "justify-content": "center" });
-        for (const k of kids) media(k, TABLET_SM, { flex: `0 0 calc(50% - ${gapExpr} / 2)`, "max-width": "100%" });
-      }
-    } else {
-      // A row whose columns fill it at the design width has no slack below it: on a 1920 design
-      // the columns keep their designed proportions from the design width down (a 1440 laptop
-      // used to show the right column cut off), otherwise only from the tablet query.
-      const contentW = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
-      const fills = total >= contentW * 0.95 || e.style["justify-content"] === "space-between";
-      const q = W > 1440 && fills ? `(max-width: ${W - 1}px)` : TABLET;
-      const weights = kids.map((k) => Math.max(1, Math.round(k.box.w)));
-      const padR = sidePadding(e.style["padding"]) / 2;
-      kids.forEach((k, i) => {
-        // A small picture (logo, icon) keeps its designed size; `width: auto` would let the
-        // browser crop or restretch it. The columns around it share the rest.
-        const smallAsset = (k.tag === "img" || k.tag === "svg" || k.tag === "video" || (k.hasAsset && !hasText(k))) && k.box.w < 300;
-        if (smallAsset) { media(k, q, { flex: "0 0 auto", "max-width": "100%" }); return; }
-        media(k, q, { flex: `${weights[i]} 1 0%`, "min-width": "0", width: "auto", "max-width": "100%" });
-        if (k.style["display"] === "flex" && k.style["flex-direction"] === "row" && !k.style["flex-wrap"]) {
-          // A row that ends at the right edge (a link list with its CTA) keeps that edge when it wraps.
-          const endAligned = k.box.x + k.box.w >= e.box.w - padR - 2;
-          media(k, q, { "flex-wrap": "wrap", "row-gap": "8px", ...(endAligned ? { "justify-content": "flex-end" } : {}) });
-        }
-      });
-      fluidImages(e, q);
+  const alike = !textish && kids.length >= 3 && Math.max(...kids.map((k) => k.box.w)) <= Math.min(...kids.map((k) => k.box.w)) * 1.3 && !navKid;
+
+  for (const d of forced) {
+    if (d.action === "wrap") media(e, atQuery(d.at), { "flex-wrap": "wrap", "row-gap": "12px" });
+    else if (d.action === "stack") stackRow(e, atQuery(d.at), hints);
+  }
+  if (!frozenPhone && need > 340) {
+    const wrapQ = bucketAtOrAbove(breakW, W), stackQ = wrapQ;
+    if (textish) { if (!covered(wrapQ)) media(e, wrapQ, { "flex-wrap": "wrap", "row-gap": "12px" }); }
+    else if (alike) rowAsGrid(e, kids, idx, W, hints, covered);
+    else if (kids.length >= 4 && !navKid) {
+      // Four or more unequal columns (a footer: brand, two link lists, newsletter) wrap into two
+      // lines once their designed widths stop fitting, and stack when a pair no longer fits.
+      const mins = kids.map((k) => minWidth(k)).sort((a, b) => b - a);
+      const pairNeed = mins[0] + mins[1] + gap + sidePadding(e.style["padding"]);
+      const q1 = bucketAtOrAbove(tightW, W), q2 = bucketAtOrAbove(breakWidth(e.box.w, pairNeed, W), W);
+      if (!covered(q1)) media(e, q1, { "flex-wrap": "wrap", "row-gap": "24px" });
+      if (!covered(q2)) stackRow(e, q2, hints);
     }
+    else if (!covered(stackQ)) stackRow(e, stackQ, hints);
+  } else if (!frozenPhone && textish && total > 340 && tall <= 80) {
+    // Fits a phone once everything around it has stacked, but may be squeezed on the way: let it wrap.
+    const q = bucketAtOrAbove(breakW, W);
+    if (!covered(q)) media(e, q, { "flex-wrap": "wrap", "row-gap": "12px" });
+  }
+
+  if (keep(idx, e, "tablet") || alike || e.style["flex-wrap"]) return;
+  if (kids.length >= 4 && !textish) return; // wraps instead of sharing (a share never wraps: basis 0)
+  if (textish || total <= 800) return;
+  // Shares: the columns keep their designed proportions from the width where the designed
+  // widths stop fitting (for a row that fills its container, right below the design width).
+  const contentW = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
+  const fills = total >= contentW * 0.95 || e.style["justify-content"] === "space-between";
+  const q = fills ? mq(W - 1) : bucketAtOrAbove(tightW, W);
+  const weights = kids.map((k) => Math.max(1, Math.round(k.box.w)));
+  const padR = sidePadding(e.style["padding"]) / 2;
+  kids.forEach((k, i) => {
+    // A small picture (logo, icon) keeps its designed size; `width: auto` would let the
+    // browser crop or restretch it. The columns around it share the rest.
+    const smallAsset = (k.tag === "img" || k.tag === "svg" || k.tag === "video" || (k.hasAsset && !hasText(k))) && k.box.w < 300;
+    if (smallAsset) { media(k, q, { flex: "0 0 auto", "max-width": "100%" }); return; }
+    // Below its own minimum a column would squeeze its labels: it stops there and the row stacks
+    // at the bucket where the minimums no longer fit (breakW is computed from the same numbers).
+    media(k, q, { flex: `${weights[i]} 1 0%`, "min-width": "0", width: "auto", "max-width": "100%" });
+    // Laptops squeeze the columns a little; from the widest bucket down each keeps its minimum
+    // (breakW, computed from the same minimums, stacks the row where they stop fitting).
+    const usable = BUCKETS.filter((b) => b < W);
+    if (usable.length) media(k, mq(usable[0]), { "min-width": `min(100%, ${px(Math.round(minWidth(k)))})` });
+    if (k.style["display"] === "flex" && k.style["flex-direction"] === "row" && !k.style["flex-wrap"]) {
+      // A row that ends at the right edge (a link list with its CTA) keeps that edge when it wraps.
+      const endAligned = k.box.x + k.box.w >= e.box.w - padR - 2;
+      media(k, q, { "flex-wrap": "wrap", "row-gap": "8px", ...(endAligned ? { "justify-content": "flex-end" } : {}) });
+    }
+  });
+  fluidImages(e, q);
+}
+
+/** A row of alike items wraps into fewer columns bucket by bucket, one column at the last. */
+/** A flex cell of `basis` width: a picture follows the cell (its designed size is the cap), a box takes it. */
+function cellStyle(k: El, basis: string, growShrink = "0 0"): Record<string, string> {
+  const h = num(k.style["height"]);
+  if (k.tag === "img" || k.tag === "video") return { flex: `${growShrink} ${basis}`, width: basis === "0%" ? "auto" : basis, "max-width": px(Math.round(k.box.w)), height: "auto", "min-width": "0", ...(h ? { "aspect-ratio": `${Math.round(k.box.w)} / ${Math.round(h)}` } : {}) };
+  return { flex: `${growShrink} ${basis}`, width: "auto", "max-width": "100%", "min-width": "0" };
+}
+
+function rowAsGrid(e: El, kids: El[], idx: ResponsiveIndex, W: number, hints: FrameHints | null, covered: (q: string) => boolean = () => false): void {
+  const cols = kids.length;
+  const itemMin = Math.max(120, ...kids.map((k) => minWidth(k)));
+  const gap = gapPx(e);
+  const gapExpr = gapExprOf(e, "16px");
+  const gridW = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
+  // Fixed-size items share the row equally as soon as their designed widths stop fitting.
+  const total = kids.reduce((n, k) => n + k.box.w, 0) + gap * (cols - 1);
+  const q0 = bucketAtOrAbove(breakWidth(e.box.w, total, W), W);
+  if (!covered(q0)) { const basis0 = `calc(${Math.round(10000 / cols) / 100}% - ${gapExpr} * ${Math.round(((cols - 1) / cols) * 100) / 100})`; for (const k of kids) media(k, q0, cellStyle(k, basis0)); }
+  let prev = cols;
+  for (const b of BUCKETS) {
+    if (b >= W) continue;
+    const name = Object.keys(BUCKET_BY_NAME).find((k) => BUCKET_BY_NAME[k] === b)!;
+    if (keep(idx, e, name)) continue;
+    let n = colsAt(gridW, itemMin, gap, cols, bucketFloor(b), W);
+    // Even counts wrap evenly (six counters 3 + 3 or 2 + 2 + 2, never 4 + 2).
+    if (cols % 2 === 0 && n % 2 === 1 && n < cols && n > 1) n -= 1;
+    if (n >= prev) continue;
+    prev = n;
+    if (covered(mq(b))) continue;
+    if (n === 1) { stackRow(e, mq(b), hints); continue; }
+    media(e, mq(b), { "flex-wrap": "wrap", "row-gap": "16px", "justify-content": "center", "align-items": "flex-start" });
+    const basis = `calc(${Math.round(10000 / n) / 100}% - ${gapExpr} * ${Math.round(((n - 1) / n) * 100) / 100})`;
+    for (const k of kids) media(k, mq(b), cellStyle(k, basis));
   }
 }
 
-/** A flex row becomes a column at `q`; children take the full width (small assets keep theirs). */
-function stackRow(e: El, q: string): void {
+/**
+ * A flex row becomes a column at `q`; children take the full width (small assets keep theirs).
+ * Hints from the designer's own narrow frame set the order and the text alignment.
+ */
+function stackRow(e: El, q: string, hints: FrameHints | null): void {
   const kids = e.children.filter((c) => c.style["position"] !== "absolute");
   media(e, q, { "flex-direction": "column", "align-items": "stretch" });
-  for (const k of kids) {
+  const ranks = hints ? kids.map((k) => hintRank(k, hints)) : [];
+  const reorder = hints && ranks.every((r) => r !== null) && ranks.some((r, i) => i > 0 && (r as number) < (ranks[i - 1] as number));
+  kids.forEach((k, i) => {
     const small = (k.hasAsset || k.tag === "svg" || k.tag === "img") && k.box.w < 300;
     const picture = !small && (k.tag === "img" || k.tag === "video" || (!!k.style["aspect-ratio"] && !hasText(k)));
     const st: Record<string, string> = small
@@ -188,9 +408,35 @@ function stackRow(e: El, q: string): void {
       : picture
         ? { width: "100%", "max-width": `min(100%, ${px(Math.round(k.box.w))})`, flex: "0 0 auto", "align-self": "center", "margin-left": "0", "margin-right": "0" }
         : { width: "100%", "max-width": "100%", flex: "0 0 auto", "margin-left": "0", "margin-right": "0" };
-    if (k.isText) st["text-align"] = k.style["text-align"] || "left";
+    if (k.isText) st["text-align"] = (hints && hints.align.get(k.id)) || k.style["text-align"] || "left";
+    if (reorder) st["order"] = String(ranks[i]);
+    // Decoration the designer left out of the narrow layout has no place in the stack.
+    if (hints && !hasText(k) && !k.hasAsset && hints.dropped.has(k.id)) st["display"] = "none";
     media(k, q, st);
-  }
+  });
+  if (hints) alignStacked(e, q, hints);
+}
+
+/** Rank of a node in the narrow frame: the earliest rank among its matched text. */
+function hintRank(k: El, hints: FrameHints): number | null {
+  let best: number | null = null;
+  const visit = (n: El) => { const r = hints.order.get(n.id); if (r !== undefined && (best === null || r < best)) best = r; n.children.forEach(visit); };
+  visit(k);
+  return best;
+}
+
+/** Text inside a stacked row takes the alignment the designer gave it on the narrow frame. */
+function alignStacked(e: El, q: string, hints: FrameHints): void {
+  const visit = (n: El, depth: number) => {
+    if (depth > 0 && n.isText) { const a = hints.align.get(n.id); if (a && a !== (n.style["text-align"] || "left")) media(n, q, { "text-align": a }); }
+    if (depth > 0 && n.style["display"] === "flex" && n.style["flex-direction"] === "column") {
+      // A column whose texts all centre on the narrow frame centres its items too.
+      const texts = n.children.filter((c) => c.isText);
+      if (texts.length && texts.every((t) => hints.align.get(t.id) === "center")) media(n, q, { "align-items": "center" });
+    }
+    n.children.forEach((c) => visit(c, depth + 1));
+  };
+  visit(e, 0);
 }
 
 /** Images inside a shared row keep their ratio and fill their column. */
@@ -206,9 +452,12 @@ function fluidImages(e: El, q: string = TABLET): void {
   e.children.forEach((c) => visit(c, e));
 }
 
-/** Overlay / absolute containers become a stacked column on phones, backdrop kept behind. */
+/**
+ * Overlay / absolute containers become a stacked column, backdrop kept behind, at the bucket
+ * where their text layers stop fitting side by side (phones at the latest).
+ */
 function stackOverlay(e: El, idx: ResponsiveIndex, topInset = 0, q: string = PHONE, force = false): void {
-  if (e.layoutKind !== "overlay" && e.layoutKind !== "absolute") return;
+  if (!absoluteLike(e)) return;
   if (!force && keep(idx, e, q === PHONE ? "phone" : "tablet")) return;
   if (pictureLike(e)) return; // scales as one picture (scaleComposition), captions handled there
   const kids = e.children;
@@ -225,9 +474,11 @@ function stackOverlay(e: El, idx: ResponsiveIndex, topInset = 0, q: string = PHO
     const wide = k.box.w >= e.box.w * 0.85 && k.box.h <= 120 && k.hasAsset; // torn edges, dividers
     if (wide) continue;
     if (!hasText(k)) {
-      // Small decorations (badges, arrows, glows) have no place in a stack.
-      if (k.box.w * k.box.h < e.box.w * e.box.h * 0.15 || k.hasAsset) media(k, q, { display: "none" });
-      else media(k, q, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", width: "100%", "max-width": `min(100%, ${px(Math.round(k.box.w))})`, height: "auto", "aspect-ratio": `${Math.round(k.box.w)} / ${Math.round(k.box.h)}`, margin: "0" });
+      // Small decorations (badges, arrows, glows) have no place in a stack; a picture that carries
+      // a side of the layout (the hero illustration) joins it at its designed size.
+      const share = (k.box.w * k.box.h) / area;
+      if (share < 0.15 || (k.hasAsset && share < 0.25)) media(k, q, { display: "none" });
+      else media(k, q, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", width: "100%", "max-width": `min(100%, ${px(Math.round(k.box.w))})`, height: "auto", "aspect-ratio": `${Math.round(k.box.w)} / ${Math.round(k.box.h)}`, margin: "0 auto", "align-self": "center" });
       continue;
     }
     media(k, q, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", width: "100%", "max-width": "100%", height: "auto", "min-height": "0", margin: "0", "z-index": k.style["z-index"] || "1" });
@@ -246,16 +497,16 @@ function tightLeading(e: El): boolean {
   return l !== null && f !== null && l < f;
 }
 
-/** Fixed heights that hold text open up on phones; nowrap text wraps; fixed images go fluid. */
-function loosen(e: El, idx: ResponsiveIndex): void {
+/** Fixed heights that hold text open up; nowrap text wraps; fixed images go fluid; controls stay tappable. */
+function loosen(e: El, idx: ResponsiveIndex, W: number): void {
   if (keep(idx, e, "phone") || pictureKids.has(e) || pictureLike(e)) return;
   const h = num(e.style["height"]);
   if (h !== null && h > 48 && hasText(e) && e.role !== "backdrop") {
     // Below the design width content can only get taller (grids lose columns,
     // rows wrap). A designed height becomes a floor, never a ceiling, so an
     // overflow-hidden section stops cutting its own text off.
-    media(e, TABLET, { height: "auto", "min-height": px(h) });
-    if (e.layoutKind !== "overlay" && e.layoutKind !== "absolute") {
+    media(e, mq(W - 1), { height: "auto", "min-height": px(h) });
+    if (!absoluteLike(e)) {
       media(e, TABLET_SM, { height: "auto", "min-height": px(Math.min(h, 200)) });
       media(e, PHONE, { height: "auto", "min-height": "0" });
     }
@@ -269,8 +520,15 @@ function loosen(e: El, idx: ResponsiveIndex): void {
   // A text that overhangs its column by design (negative margins) has nowhere to hang
   // once the column is narrower than a phone: it spans the column instead.
   if (e.isText && ((e.style["margin-left"] || "").startsWith("-") || (e.style["margin-right"] || "").startsWith("-"))) media(e, TABLET, { width: "100%", "max-width": "100%", "margin-left": "0", "margin-right": "0" });
+  if ((e.style["width"] || "").startsWith("calc(100% +")) media(e, mq(W - 1), { width: "100%" });
   if (e.isText && e.style["white-space"] === "nowrap" && e.box.w > 240) media(e, TABLET, { "white-space": "normal" }); // a long single line (copyright, tagline) wraps rather than clips
   const w = num(e.style["width"]);
+  // Nothing designed at a fixed width may be wider than the box it is in once the boxes shrink.
+  const pxMax = /^[\d.]+px$/.test(e.style["max-width"] || "");
+  if (w !== null && w >= 120 && (e.style["max-width"] === undefined || pxMax) && e.style["position"] !== "absolute") {
+    const picture = e.tag === "svg" || e.tag === "img" || e.tag === "video";
+    media(e, mq(W - 1), { "max-width": "100%", ...(picture && e.style["height"] ? { height: "auto", "aspect-ratio": `${Math.round(e.box.w)} / ${Math.round(Math.max(1, e.box.h))}` } : {}) });
+  }
   // A hug container wider than a phone (its children carry the width) must be allowed to shrink.
   if (!e.isText && e.tag !== "img" && w === null && e.box.w >= 360 && e.style["position"] !== "absolute" && e.style["display"] === "flex") media(e, PHONE, { width: "100%", "max-width": "100%" });
   if ((e.tag === "img" || e.tag === "video") && w !== null && w >= 280 && e.style["position"] !== "absolute") {
@@ -278,6 +536,9 @@ function loosen(e: El, idx: ResponsiveIndex): void {
     media(e, PHONE, { width: "100%", height: "auto", ...(hh ? { "aspect-ratio": `${Math.round(w)} / ${Math.round(hh)}` } : {}) });
   }
   if (!e.isText && e.tag !== "img" && w !== null && w >= 360 && e.style["position"] !== "absolute") media(e, PHONE, { width: "100%" });
+  // Touch: a button-like control shorter than 44px grows to the recommended tap height on phones.
+  const control = e.tag === "button" || (e.tag === "a" && !!(e.style["background-color"] || e.style["border"] || e.style["background-image"]) && !e.hasAsset);
+  if (control && e.box.h < 40 && e.box.h >= 16 && hasText(e) && e.style["position"] !== "absolute") media(e, PHONE, { "min-height": "44px", "align-items": "center", ...(e.style["display"] === "flex" ? {} : { display: "inline-flex", "justify-content": "center" }) });
 }
 
 /** Direct children of a picture-like composition: their fixed heights are % of the picture, never loosened. */
@@ -293,20 +554,15 @@ export function pictureLike(e: El): boolean {
   const W = e.box.w, H = e.box.h;
   if (W < 300 || H < 120) return false;
   const bg = /url\(/.test(e.style["background-image"] || "");
-  const cover = e.children.some((k) => k.hasAsset && !hasText(k) && (k.box.w * k.box.h) / (W * H) >= 0.6);
+  const cover = e.children.some((k) => (k.tag === "img" || k.tag === "video") && !hasText(k) && (k.box.w * k.box.h) / (W * H) >= 0.6);
   if (!bg && !cover) return false;
   const kids = e.children.filter((k) => k.style["position"] === "absolute");
   if (!kids.length || !kids.some(hasText)) return false;
   return textLeafArea(e) / (W * H) <= 0.12;
 }
 
-/**
- * A text-less absolute composition (photo + plate + badge, map with pins,
- * polaroid stack) scales as ONE picture: percentage offsets inside a box that
- * keeps the design's aspect ratio. Exact at the design width, fluid below it.
- */
 /** Horizontal padding in px from a padding shorthand; fluid tokens `min(Apx, Bvw)` count as A. */
-function sidePadding(padding: string | undefined): number {
+export function sidePadding(padding: string | undefined): number {
   if (!padding) return 0;
   const tokens = padding.match(/min\([^)]*\)|[-\d.]+px|0/g) || [];
   const pxOf = (t: string) => { const m = t.match(/([\d.]+)px/); return m ? parseFloat(m[1]) : 0; };
@@ -343,8 +599,8 @@ function scaleTextComposition(e: El, frameW: number): void {
     if (st["position"] === "absolute") for (const prop of ["left", "top", "right", "bottom"] as const) { const v = num(st[prop]); if (v !== null && v !== 0) st[prop] = cq(v); }
     for (const prop of ["width", "height", "min-height"] as const) { const v = num(st[prop]); if (v !== null && v > 0) st[prop] = cq(v); }
     if (k.isText) {
-      const fs = num(st["font-size"]); if (fs !== null) st["font-size"] = `clamp(9px, ${cq(fs)}, ${px(fs)})`;
-      const lh = num(st["line-height"]); if (lh !== null) st["line-height"] = `clamp(11px, ${cq(lh)}, ${px(lh)})`;
+      const fs = num(st["font-size"]); if (fs !== null) st["font-size"] = `clamp(12px, ${cq(fs)}, ${px(fs)})`;
+      const lh = num(st["line-height"]); if (lh !== null) st["line-height"] = `clamp(14px, ${cq(lh)}, ${px(lh)})`;
       const ls = num(st["letter-spacing"]); if (ls !== null && ls !== 0) st["letter-spacing"] = cq(ls);
       compositionText.add(k);
     }
@@ -353,8 +609,13 @@ function scaleTextComposition(e: El, frameW: number): void {
   visitLeaf(e, 0);
 }
 
+/**
+ * A text-less absolute composition (photo + plate + badge, map with pins,
+ * polaroid stack) scales as ONE picture: percentage offsets inside a box that
+ * keeps the design's aspect ratio. Exact at the design width, fluid below it.
+ */
 function scaleComposition(e: El, frameW = Infinity): void {
-  if (e.layoutKind !== "absolute" && e.layoutKind !== "overlay") return;
+  if (e.layoutKind !== "absolute" && e.layoutKind !== "overlay") return; // the plan's compositions only: a positioned frame keeps its px layers
   const picture = pictureLike(e);
   if (hasText(e) && !picture) { scaleTextComposition(e, frameW); return; }
   const W = e.box.w, H = e.box.h;
@@ -392,9 +653,9 @@ function scaleComposition(e: El, frameW = Infinity): void {
   const scaleLeaf = (k: El) => {
     const st: Record<string, string> = {}, reset: Record<string, string> = {};
     const fs = num(k.style["font-size"]);
-    if (k.isText && fs !== null) { st["font-size"] = `clamp(9px, ${cq(fs)}, ${px(fs)})`; reset["font-size"] = k.style["font-size"]; }
+    if (k.isText && fs !== null) { st["font-size"] = `clamp(12px, ${cq(fs)}, ${px(fs)})`; reset["font-size"] = k.style["font-size"]; }
     const lh = num(k.style["line-height"]);
-    if (k.isText && lh !== null) { st["line-height"] = `clamp(11px, ${cq(lh)}, ${px(lh)})`; reset["line-height"] = k.style["line-height"]; }
+    if (k.isText && lh !== null) { st["line-height"] = `clamp(14px, ${cq(lh)}, ${px(lh)})`; reset["line-height"] = k.style["line-height"]; }
     const w = num(k.style["width"]), h = num(k.style["height"]);
     if (w !== null && k.style["position"] !== "absolute") { st["width"] = `min(${px(w)}, ${cq(w)})`; reset["width"] = k.style["width"]; if (h !== null && (k.tag === "img" || k.tag === "svg" || k.hasAsset)) { st["height"] = "auto"; st["aspect-ratio"] = `${Math.round(w)} / ${Math.round(h)}`; reset["height"] = k.style["height"]; reset["aspect-ratio"] = "auto"; } }
     if (Object.keys(st).length) { Object.assign(k.style, st); media(k, PHONE, reset); }
@@ -426,7 +687,7 @@ function scaleComposition(e: El, frameW = Infinity): void {
  *  - anything with text or a large image joins the flow where the DOM has it.
  */
 function absoluteInFlow(e: El): void {
-  if (e.style["display"] !== "flex" || e.layoutKind === "overlay" || e.layoutKind === "absolute") return;
+  if (e.style["display"] !== "flex" || absoluteLike(e)) return;
   const area = Math.max(1, e.box.w * e.box.h);
   for (const k of e.children) {
     if (k.style["position"] !== "absolute") continue;
@@ -436,7 +697,16 @@ function absoluteInFlow(e: El): void {
     const l = num(k.style["left"]), r = num(k.style["right"]), w = num(k.style["width"]);
     if (l !== null && l > 0) k.style["left"] = pct(l);
     if (r !== null && r > 0) k.style["right"] = pct(r);
-    if (w !== null && w >= 120 && (l !== null || r !== null)) { k.style["width"] = pct(w); delete k.style["max-width"]; }
+    if (w !== null && w >= 120 && l === null && r === null && k.style["left"] && !k.style["right"] && !(k.style["left"] || "").includes("50%")) {
+      // Placed by a fluid offset (fluidAbsolute made it `min(px, vw)`): the box may not run past the right edge.
+      k.style["max-width"] = `calc(100% - ${k.style["left"]})`;
+    }
+    if (w !== null && w >= 120 && (l !== null || r !== null)) {
+      k.style["width"] = pct(w); delete k.style["max-width"];
+      // A picture whose width now follows the container keeps its proportions.
+      const h = num(k.style["height"]);
+      if (h !== null && (k.tag === "img" || k.tag === "video" || (k.hasAsset && !hasText(k)))) { k.style["height"] = "auto"; k.style["aspect-ratio"] = `${Math.round(w)} / ${Math.round(h)}`; }
+    }
     const share = (k.box.w * k.box.h) / area;
     const fullBleed = k.box.w >= e.box.w * 0.85 && (share >= 0.6 || k.box.h <= 120);
     if (fullBleed || k.role === "backdrop") continue;
@@ -473,9 +743,9 @@ function anchorEdgeStrips(e: El): void {
 
 const INFLOW: Record<string, string> = { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", margin: "0" };
 
-function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
+function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number, hints: FrameHints | null): void {
   for (const d of idx.get(e.id) || []) {
-    const q = d.at === "phone" ? PHONE : TABLET;
+    const q = atQuery(d.at);
     const positioned = e.style["position"] === "absolute";
     const isRow = e.style["display"] === "flex" && e.style["flex-direction"] === "row";
     const isGrid = e.style["display"] === "grid";
@@ -496,7 +766,8 @@ function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
         else if (isRow) {
           const gapExpr = gapExprOf(e, "16px");
           media(e, q, { "flex-direction": "row", "flex-wrap": "wrap", "row-gap": "16px", "justify-content": "center", "align-items": "flex-start" });
-          for (const k of e.children.filter((c) => c.style["position"] !== "absolute")) media(k, q, { flex: `0 0 calc(${Math.round(10000 / n) / 100}% - ${gapExpr} * ${Math.round(((n - 1) / n) * 100) / 100})`, width: "auto", "max-width": "100%" });
+          const basis = `calc(${Math.round(10000 / n) / 100}% - ${gapExpr} * ${Math.round(((n - 1) / n) * 100) / 100})`;
+          for (const k of e.children.filter((c) => c.style["position"] !== "absolute")) media(k, q, cellStyle(k, basis));
         }
         break;
       }
@@ -511,15 +782,16 @@ function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
       case "stack":
         if (composition && pictureLike(e)) break; // a collage scales as one picture; its captions already stack on phones
         if (composition) stackOverlay(e, idx, topInset, q, true);
-        else if (isRow) stackRow(e, q);
+        else if (isRow) { /* applied in rows() so the shares stage sees it */ }
         else if (isGrid) media(e, q, { "grid-template-columns": "repeat(1, minmax(0, 1fr))" });
         if (positioned) media(e, q, { ...INFLOW, width: "100%", "max-width": "100%" });
         break;
-      case "wrap": if (isRow) media(e, q, { "flex-wrap": "wrap", "row-gap": "12px" }); break;
+      case "wrap": break; // applied in rows()
       case "row": if (e.style["display"] === "flex") media(e, q, { "flex-direction": "row" }); break;
       default: break;
     }
   }
+  void hints;
 }
 
 /**
@@ -527,13 +799,16 @@ function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
  * text inside one never shrinks with the column around it (flex items refuse
  * to go below their content: min-width:auto). Below the design width they may.
  */
-function shrinkHug(e: El): void {
+function shrinkHug(e: El, W: number): void {
   if (e.style["display"] !== "flex") return;
   const row = e.style["flex-direction"] === "row";
+  // A row that wraps somewhere must keep its items' minimums, or they shrink instead of wrapping.
+  const wraps = !!e.style["flex-wrap"] || Object.values(e.media).some((m) => m["flex-wrap"] === "wrap");
+  const allNowrap = (n: El): boolean => n.isText ? n.style["white-space"] === "nowrap" : n.children.length > 0 && n.children.every(allNowrap);
   for (const k of e.children) {
     if (k.isText || k.tag === "img" || k.tag === "svg" || k.tag === "video" || k.style["position"] === "absolute") continue;
     if (k.style["width"] !== undefined || k.style["flex"] !== undefined || !k.children.length) continue;
-    media(k, TABLET, row ? { "min-width": "0", "max-width": "100%" } : { "max-width": "100%" });
+    media(k, mq(W - 1), row && !wraps && !allNowrap(k) ? { "min-width": "0", "max-width": "100%" } : { "max-width": "100%" });
   }
 }
 
@@ -542,15 +817,18 @@ function shrinkHug(e: El): void {
  * it) is absolutely placed inside a fixed-height box. Once its content stacks
  * on a phone it must drive the height: bring it into the flow.
  */
-function panelsInFlow(e: El): void {
+function panelsInFlow(e: El, W: number): void {
   const panels = e.children.filter((c) => c.role === "panel");
   if (!panels.length) return;
-  media(e, PHONE, { height: "auto", "min-height": "0" });
+  // Below the design width the panel's content reflows and may grow; the panel must drive the
+  // section's height from there. At the design width the two heights are the same.
+  const q = mq(W - 1);
+  media(e, q, { height: "auto", "min-height": "0" });
   // The inner held the designed height for the absolute layout; the panel drives it now.
-  for (const c of e.children) if (c.role === "inner" && !hasText(c)) media(c, PHONE, { height: "auto", "min-height": "0" });
+  for (const c of e.children) if (c.role === "inner" && !hasText(c)) media(c, q, { height: "auto", "min-height": "0", "aspect-ratio": "auto" });
   for (const p of panels) {
     const top = num(p.style["top"]) || 0;
-    media(p, PHONE, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", "margin-top": px(Math.max(0, top)), height: "auto", "min-height": "0" });
+    media(p, q, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", "margin-top": px(Math.max(0, top)), height: "auto", "min-height": "0" });
   }
 }
 
@@ -558,12 +836,15 @@ function panelsInFlow(e: El): void {
  * A frame only serves viewports in its breakpoint range. Transforms written
  * for widths it never displays at (a phone rule on a desktop frame that hands
  * over to a mobile frame at 768) are dropped, and a frame never gets
- * transforms at or above its own design width — the designer drew that.
+ * max-width transforms at or above its own design width — the designer drew that.
+ * Min-width rules (stretching) are kept only when the range reaches above them.
  */
 export function pruneMedia(sections: Section[], W: number, range: { min: number; max: number | null }): void {
   const applies = (q: string): boolean => {
-    const m = q.match(/max-width:\s*(\d+)px/); if (!m) return true;
-    const maxW = parseInt(m[1], 10);
+    const mx = q.match(/max-width:\s*(\d+)px/), mn = q.match(/min-width:\s*(\d+)px/);
+    if (mn) { const minW = parseInt(mn[1], 10); return range.max === null || minW <= range.max; }
+    if (!mx) return true;
+    const maxW = parseInt(mx[1], 10);
     if (maxW >= W) return false;                       // at/above the design width
     if (maxW < range.min) return false;                // below this frame's range
     return true;
@@ -578,41 +859,126 @@ export function pruneMedia(sections: Section[], W: number, range: { min: number;
  * with them instead of clipping (an absolutely placed child cannot grow its
  * parent). Backdrops stay pinned and stretch.
  */
-function overlayGrow(e: El, idx: ResponsiveIndex): void {
-  if (e.layoutKind !== "overlay" && e.layoutKind !== "absolute") return;
+function overlayGrow(e: El, idx: ResponsiveIndex, W: number): void {
+  if (!absoluteLike(e)) return;
   if (keep(idx, e, "tablet") || pictureLike(e)) return;
   for (const k of e.children) if (restsOutside(k, e)) media(k, TABLET, { display: "none" });
   const big = e.children
     .filter((k) => k.style["position"] === "absolute" && k.role !== "backdrop" && hasText(k) && k.box.w >= e.box.w * 0.5 && !restsOutside(k, e))
     .sort((a, b) => a.box.y - b.box.y);
-  if (!big.length) return;
+  if (!big.length) { overlayRow(e); return; }
   const h = num(e.style["height"]) || num(e.style["min-height"]) || e.box.h;
-  media(e, TABLET, { height: "auto", "min-height": px(h) });
+  // Layers that follow one another vertically can join the flow as soon as the box shrinks (the
+  // result is the design at the design width); layers that overlap wait for the tablet bucket.
+  const sequential = big.every((k, i) => i === 0 || k.box.y >= big[i - 1].box.y + big[i - 1].box.h - 2);
+  const q = sequential ? mq(W - 1) : TABLET;
+  media(e, q, { height: "auto", "min-height": px(h) });
   let prevBottom = 0;
   for (const k of big) {
-    const st: Record<string, string> = { position: "relative", top: "auto", bottom: "auto", right: "auto", "margin-top": px(Math.max(0, k.box.y - prevBottom)) };
+    const st: Record<string, string> = { position: "relative", top: "auto", bottom: "auto", right: "auto", "margin-top": px(Math.max(0, k.box.y - prevBottom)), "max-width": "100%" };
     if ((k.style["left"] || "").includes("50%")) { st["left"] = "auto"; st["transform"] = "none"; st["margin-left"] = "auto"; st["margin-right"] = "auto"; }
-    else { st["margin-left"] = k.style["left"] || "0"; st["left"] = "auto"; }
-    media(k, TABLET, st);
+    else { const l = k.style["left"] || "0"; st["margin-left"] = l; st["left"] = "auto"; if (l !== "0" && l !== "0px") st["max-width"] = `calc(100% - ${l})`; }
+    media(k, q, st);
     prevBottom = k.box.y + k.box.h;
   }
   // Whatever sits below the last grown layer keeps its distance from the bottom.
   const tail = e.children.filter((k) => k.style["position"] === "absolute" && !big.includes(k) && k.role !== "backdrop" && k.box.y >= prevBottom - 1 && hasText(k) && !restsOutside(k, e));
-  for (const k of tail) media(k, TABLET, { top: "auto", bottom: px(Math.max(0, e.box.h - (k.box.y + k.box.h))) });
+  for (const k of tail) media(k, q, { top: "auto", bottom: px(Math.max(0, e.box.h - (k.box.y + k.box.h))) });
 }
 
-export function applyResponsive(sections: Section[], W: number, idx: ResponsiveIndex = new Map()): void {
-  const visit = (e: El, depth: number, topInset: number) => {
-    fluidPadding(e, W); fluidGap(e, W); fluidAbsolute(e, W); fluidType(e, W);
-    collapseGrid(e, idx); rows(e, depth, idx, W); overlayGrow(e, idx); stackOverlay(e, idx, topInset); loosen(e, idx); shrinkHug(e);
-    if (!keep(idx, e, "phone")) { scaleComposition(e, W); anchorEdgeStrips(e); absoluteInFlow(e); panelsInFlow(e); }
-    applyDecisions(e, idx, topInset);
-    e.children.forEach((c) => visit(c, depth + 1, c.role === "inner" ? topInset : 0));
+/**
+ * An absolute container holding a few small text layers side by side (three cards on a band, two
+ * quotes on a photo) becomes a flex row on tablets: the layers keep their order and share the width,
+ * and the box grows with them instead of clipping. Phones stack the row (stackOverlay).
+ */
+function overlayRow(e: El): void {
+  const layers = e.children.filter((k) => k.style["position"] === "absolute" && k.role !== "backdrop" && hasText(k) && !restsOutside(k, e));
+  if (layers.length < 2 || layers.length > 4) return;
+  const sorted = [...layers].sort((a, b) => a.box.x - b.box.x);
+  // Side by side: each next layer starts past the previous one and shares its vertical band.
+  for (let i = 1; i < sorted.length; i++) {
+    const a = sorted[i - 1], b = sorted[i];
+    const overlapY = Math.min(a.box.y + a.box.h, b.box.y + b.box.h) - Math.max(a.box.y, b.box.y);
+    if (b.box.x < a.box.x + a.box.w - 4 || overlapY < Math.min(a.box.h, b.box.h) * 0.5) return;
+  }
+  const others = e.children.filter((k) => !layers.includes(k) && k.role !== "backdrop" && k.style["position"] === "absolute");
+  if (others.some((k) => hasText(k))) return;
+  const padT = Math.max(0, Math.round(Math.min(...layers.map((k) => k.box.y))));
+  const padB = Math.max(0, Math.round(e.box.h - Math.max(...layers.map((k) => k.box.y + k.box.h))));
+  const padL = Math.max(0, Math.round(sorted[0].box.x)), padR = Math.max(0, Math.round(e.box.w - (sorted[sorted.length - 1].box.x + sorted[sorted.length - 1].box.w)));
+  const gap = Math.max(16, Math.round(Math.min(...sorted.slice(1).map((b, i) => b.box.x - (sorted[i].box.x + sorted[i].box.w)))));
+  media(e, TABLET, { display: "flex", "flex-direction": "row", "align-items": "flex-start", gap: px(gap), height: "auto", "min-height": "0", padding: `${px(padT)} ${px(Math.min(padR, 48))} ${px(padB)} ${px(Math.min(padL, 48))}`, "aspect-ratio": "auto" });
+  sorted.forEach((k, i) => media(k, TABLET, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", flex: `${Math.max(1, Math.round(k.box.w))} 1 0%`, width: "auto", "min-width": "0", "max-width": "100%", height: "auto", "min-height": "0", margin: "0", order: String(i) }));
+  for (const k of others) if (k.box.w * k.box.h < e.box.w * e.box.h * 0.15 || k.hasAsset) media(k, TABLET, { display: "none" });
+  for (const k of e.children) if (k.role === "backdrop") media(k, TABLET, { position: "absolute", inset: "0", width: "100%", height: "100%", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", "max-width": "none" });
+}
+
+/**
+ * An overlay whose text layers sit side by side (copy left, card right) stacks at the bucket
+ * where they stop fitting, which may be a tablet; one whose layers already sit one under the
+ * other stacks on phones only.
+ */
+function overlayStackQuery(e: El, W: number): string {
+  if (!absoluteLike(e)) return PHONE;
+  const layers = e.children.filter((k) => k.style["position"] === "absolute" && k.role !== "backdrop" && hasText(k) && !restsOutside(k, e));
+  if (layers.length < 2) return PHONE;
+  const sorted = [...layers].sort((a, b) => a.box.x - b.box.x);
+  let sideBySide = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const a = sorted[i - 1], b = sorted[i];
+    const overlapY = Math.min(a.box.y + a.box.h, b.box.y + b.box.h) - Math.max(a.box.y, b.box.y);
+    if (overlapY > Math.min(a.box.h, b.box.h) * 0.3 && b.box.x >= a.box.x + a.box.w * 0.6) sideBySide = Math.max(sideBySide, minWidth(a) + minWidth(b) + 24);
+  }
+  if (!sideBySide) return PHONE;
+  return widerQ(PHONE, bucketAtOrAbove(breakWidth(e.box.w, sideBySide, W), W));
+}
+
+/* ------------------------------------------------------------ stretch */
+
+/**
+ * A frame shown ABOVE its design width (a 390 phone frame serving up to 767): its centred
+ * inner boxes, spanning fixed-width blocks and pictures follow the viewport instead of the
+ * design width. Type and small elements keep their size: it stays a phone layout, wider.
+ */
+export function stretchFrame(sections: Section[], W: number, range: { min: number; max: number | null }): void {
+  if (range.max !== null && range.max <= W) return;
+  if (W >= 1024) return; // a desktop frame centres and bleeds; it does not scale up
+  const q = `(min-width: ${W + 1}px)`;
+  const visit = (e: El, contentW: number) => {
+    const w = num(e.style["width"]);
+    const spans = e.box.w >= contentW * 0.9;
+    if (e.role === "inner") media(e, q, { "max-width": "none" });
+    // A picture capped at its designed size inside a box that now grows would float in empty space.
+    if ((e.style["max-width"] || "").startsWith("min(100%,") && (e.tag === "img" || e.tag === "video" || e.hasAsset)) media(e, q, { "max-width": "100%" });
+    if (e.role === "inner") { /* handled */ }
+    else if (e.style["position"] !== "absolute" && spans && !e.isText) {
+      if (e.tag === "img" || e.tag === "video") {
+        const h = num(e.style["height"]);
+        media(e, q, { width: "100%", "max-width": "100%", height: "auto", ...(h && w ? { "aspect-ratio": `${Math.round(w)} / ${Math.round(h)}` } : {}) });
+      } else if (w !== null || e.style["max-width"] !== undefined) media(e, q, { width: "100%", "max-width": "100%" });
+    } else if (e.isText && spans && (w !== null || e.style["max-width"])) media(e, q, { width: "100%", "max-width": "100%" });
+    const inner = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
+    e.children.forEach((c) => visit(c, inner));
+  };
+  for (const s of sections) visit(s.el, s.box.w);
+}
+
+/* --------------------------------------------------------------- main */
+
+export function applyResponsive(sections: Section[], W: number, idx: ResponsiveIndex = new Map(), hints: FrameHints | null = null): void {
+  const visit = (e: El, depth: number, topInset: number, parent: El | null) => {
+    fluidPadding(e, W); fluidGap(e, W); fluidAbsolute(e, W, parent); fluidType(e, W);
+    collapseGrid(e, idx, W); rows(e, idx, W, hints); overlayGrow(e, idx, W);
+    if (!(idx.get(e.id) || []).some((d) => d.action === "stack")) stackOverlay(e, idx, topInset, overlayStackQuery(e, W));
+    loosen(e, idx, W); shrinkHug(e, W);
+    if (!keep(idx, e, "phone")) { scaleComposition(e, W); anchorEdgeStrips(e); absoluteInFlow(e); panelsInFlow(e, W); }
+    applyDecisions(e, idx, topInset, hints);
+    e.children.forEach((c) => visit(c, depth + 1, c.role === "inner" ? topInset : 0, e));
   };
   sections.forEach((s, i) => {
     // A section the previous one overlaps (a header on a hero) must start its stack below it.
     const prev = sections[i - 1];
     const overlap = prev ? Math.max(0, prev.box.y + prev.box.h - s.box.y) : 0;
-    visit(s.el, 0, overlap > 0 && overlap < 200 ? overlap : 0);
+    visit(s.el, 0, overlap > 0 && overlap < 200 ? overlap : 0, null);
   });
 }

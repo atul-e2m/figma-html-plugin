@@ -27,8 +27,9 @@ Height exact on every design.
 | Famous Vineyards (no auto-layout, licensed fonts not on Google) | 1440 × 6225 | — | 6.49 % | 3.22 % | — |
 
 Build time is a full fresh conversion including the two model calls (plan + responsive review);
-the compiler itself runs in 20–240 ms. Single-frame designs come out responsive (tablet and phone)
-with an audit of overflow / clipped / overlapping text at 390, 768, 1024 and 2560 px.
+the compiler itself runs in 20–240 ms. Single-frame designs come out responsive at every width
+(content-driven breakpoints in five buckets shared with Elementor), with an audit of overflow /
+clipped / overlapping / squeezed text at a ladder of widths from 320 to 2560 px.
 
 ## The three stages
 
@@ -73,7 +74,9 @@ f2h compile <bundle> [--out dir]
 f2h elementor <bundle> [--public-base url]  # Elementor Editor V4 template -> out/elementor/ (see below)
 f2h verify  <bundle> [--out dir] [--url u]  # writes out/verify/<frame>.report.json + -side.png
 f2h refine  <bundle>                        # model corrects the plan from verify measurements
+f2h measure <bundle>                        # stack the rows the audit proved too tight (deterministic)
 f2h responsive <bundle>                     # model corrects the responsive baseline from the audit
+f2h regress ["v2 tests"] [--update]         # rebuild + verify the corpus against baseline.json
 f2h build   <bundle> [--no-model] [--refine 2]
 ```
 
@@ -169,15 +172,75 @@ server-side refusal fallbacks and retry without them if the account does not acc
 
 ## Responsive behaviour
 
-Two cases, both handled:
+Everything below is plain CSS — no runtime script, one DOM per frame — and the same rules feed the
+HTML and the Elementor emitter. Five **breakpoint buckets** are shared by both: max-width 1366
+(laptop), 1200 (tablet-lg), 1024 (tablet), 880 (tablet-sm) and 767 (phone). They are Elementor's
+device set (laptop, tablet_extra, tablet, mobile_extra, mobile), so a template imports with the same
+variants the HTML has (`tools/elementor_deploy.sh` activates them in the Kit).
 
-**Several frames were exported (desktop + tablet + mobile).** Each frame compiles into its own
-`.page-root[data-bp]` and media queries switch between them at the breakpoints in
-`plans/responsive.plan.json` (defaults: phone ≤767, tablet ≤1023, else desktop). The design is the
-authority at every width it was drawn for: a frame gets no responsive transforms at or above its own
-width, nor for widths another frame serves (`pruneMedia`). Verify diffs each frame against its own
-screenshot and audits the desktop frame only at widths no other frame covers. Tested end to end on a
-1920 + 390 export. Merging the frames into one DOM (`sectionPairs`) is the next step and not done yet.
+**Content-driven, not width-driven.** `src/compiler/responsive.ts` gives every row, grid and
+overlay the viewport width at which its content stops fitting — from the design boxes and the copy
+(`minWidth`: a label keeps its line, a paragraph wraps down to its longest word, a picture that
+carries a column shrinks to a third, icons keep their size) and the fact that below the design width
+every box is a constant share of the viewport (fluid padding and gaps) — and emits the transform at
+the bucket just above that width, so it is in force before the content breaks:
+
+- a text-ish row (nav links, tags, buttons) wraps;
+- a row of three or more alike items (cards, counters, logos) shares the row equally as soon as its
+  designed widths stop fitting, then loses columns bucket by bucket (even counts stay even), and
+  stacks last;
+- a content row (copy beside a picture) shares the width in proportion from where its designed
+  widths stop fitting (right below the design width for a row that fills it; columns may squeeze a
+  little on laptops and keep their minimum from the 1366 bucket down) and stacks at the bucket where
+  its minimums no longer fit; four or more unequal columns (a footer) wrap into two lines first;
+- a grid drops columns at the bucket where its cells stop fitting (4 → 2 rather than 4 → 3);
+- an overlay whose text layers follow one another vertically lets them join the flow right below
+  the design width so the box grows instead of clipping; side-by-side text layers (three cards on a
+  band) become a flex row on tablets; an overlay stacks over its backdrop where its layers stop
+  fitting side by side (phones at the latest), large pictures joining the stack, decorations hidden;
+  a frame without auto-layout whose children are all placed by coordinates counts as an overlay;
+- fixed heights holding text open up right below the design width; fixed widths are capped at
+  100 % of their box; a text drawn wider than its column spans the column; a band overhanging both
+  edges bleeds to the viewport edges; a centred absolute box keeps its parent's side padding;
+- a header (logo | links | actions) gets a **CSS-only menu**: the link list hides behind a 44 px
+  button (`<input type="checkbox">` + `<label>`, no script) from the bucket where the row stops
+  fitting, phones at the latest — or right below the design width when the links cannot fit a laptop.
+  Elementor gets the fallback: the link list drops to its own centred line;
+- touch: hover-reveal layers (a slide-in arrow) are shown outright under `@media (hover: none)`;
+  button-like controls shorter than 40 px grow to 44 px on phones; `prefers-reduced-motion` kills
+  transitions; `<img>` elements carry `width`/`height` so the browser reserves the box.
+
+**Measured corrections** (`f2h measure`, part of `f2h build`). The audit renders the page at a
+ladder of widths (`AUDIT_LADDER` in `src/cli.ts`: 1600, 1440, 1367, 1280, 1201, 1100, 1025, 900, 881,
+768, 600, 481, 430, 390, 360, 320 — one just above and one well inside every bucket, `--ladder full`
+for all of them) and, for every squeezed paragraph, clipped label or overflow, records the row it
+sits in (`culprits`). `measure` stacks those rows from the bucket above the failing width by writing
+`plan.responsive` entries (note `measured@<w>`), the estimate corrected by the browser. Deterministic,
+no model.
+
+**Model corrections** (`f2h responsive`, part of `f2h build`) then see the design, the measured
+baseline's renders and the audit, and return per-node decisions in a closed vocabulary — `stack`,
+`row`, `wrap`, `columns N`, `hide`, `full-width`, `center`, `keep` — each at a bucket
+(`laptop | tablet-lg | tablet | tablet-sm | phone`). A decision owns its bucket and the narrower
+ones; the heuristics still run above it. Hand-editable like the rest of the plan.
+
+**Several frames were exported (desktop + mobile, or desktop + tablet + mobile).** Each frame owns a
+breakpoint range (`plans/responsive.plan.json`; defaults: a phone frame hands over at 768, a tablet
+frame at 1024) and is the authority inside it: no transforms at or above its own width, none for
+widths another frame serves (`pruneMedia`). The widths between the frames are covered from both
+sides:
+
+- the wider frame is restructured with the rules above, and its **section pairs** with the narrower
+  frame (`sectionPairs`, matched by slug, then by shared copy; `src/compiler/pairs.ts`) turn the
+  designer's own phone layout into hints — when a desktop row stacks, its children take the order of
+  their matched text on the phone frame and text takes the phone frame's alignment;
+- the narrower frame **stretches** above its own width (`stretchFrame`): its inner boxes, spanning
+  fixed-width blocks and pictures follow the viewport, type stays; a 390 frame at 700 is a wide
+  phone layout, not a centred 390 column (the audit's `underfilled` check watches this).
+
+Verify audits each frame across its own range, both sides of every handover included. Merging the
+frames into one DOM (so a phone does not download the desktop's images) is designed (`sectionPairs`)
+and not built yet.
 
 **Screens wider than the design.** The page root is not capped. Every full-width section is split
 into an outer box that bleeds to the viewport edges (its background, backdrop photo, torn edges,
@@ -185,34 +248,10 @@ stripes, spanning panels) and a centred inner box of the design width that holds
 made of full-width bands (stripes + navbar) bleed band by band. Below the design width the inner is
 100% wide, so nothing changes there.
 
-**One frame only.** The compiler makes it responsive in two layers:
-
-1. *Deterministic baseline* (`src/compiler/responsive.ts`). At the design width nothing changes.
-   Below it: side padding, gaps, offsets and large type scale with the viewport; grids drop columns
-   (4+ → 2 on tablets, everything → 1 on phones; 3 narrow columns stay 3); text rows wrap; content
-   rows with 2–3 wide columns share the width on tablets and stack from portrait tablets (≤900) down;
-   overlays (text on a photo) become a stacked column over their backdrop on phones; text-less
-   compositions (photo + plate + badge) scale as one picture; a *collage* (a container whose picture
-   is its own background image, or one covering image, with small captions over it) also scales as
-   one picture, its captions shrinking with it through container-query units, and on phones the
-   picture keeps its box (as top padding) with the captions in flow beneath it; fixed heights that hold
-   text open up; absolutely placed badges/photos inside flowing content are hidden (small) or join the
-   flow (large); nowrap text may wrap; a header that overlaps the hero pushes the hero's stack down;
-   a header row (logo | links | actions) too wide for a portrait tablet drops its `<nav>` to its own
-   centred line; four or six small equal items (counters) wrap 2-up instead of 3 + 1; hug-width
-   containers may shrink below the design width so fixed-width text inside them wraps instead of
-   overflowing; an image never grows past its designed width when it goes "full width" or stacks;
-   only an image that carries its column goes fluid (an avatar or icon beside text keeps its size).
-2. *Model corrections* (`f2h responsive`, part of `f2h build`). The model sees the design, the
-   baseline's own tablet/phone renders and the audit of them, and returns per-node decisions in a
-   closed vocabulary — `stack`, `row`, `wrap`, `columns N`, `hide`, `full-width`, `center`, `keep` —
-   stored in `plan.responsive` and applied under the matching media query. Hand-editable like the
-   rest of the plan. `columns N` on a flex row wraps it with each item `100%/N` minus the row's gap
-   expression; a `stack` on a collage is ignored (the picture already handles phones).
-
-`f2h verify` renders single-frame designs at 1024, 768 and 390 and writes
-`out/verify/<frame>-vp<width>.png` plus `<frame>.audit.json`: horizontal overflow, clipped text,
-overlapping text, text under 12px, and a score. Zero is the goal; the audit is what the model reads.
+**Regression.** `f2h regress ["v2 tests"] [--update] [--only a,b]` rebuilds and verifies every bundle
+of the corpus with the plans on disk and compares pixel mismatch, layout-only mismatch, overflow and
+the audit score at every width against `v2 tests/baseline.json`; any increase fails. `--update`
+stores the new numbers.
 
 ## Robustness to the plan and to imported designs
 

@@ -67,26 +67,26 @@ Return the corrected full plan JSON.`;
 }
 
 
-export const RESPONSIVE_SYSTEM = `You are the responsive designer inside a Figma-to-HTML compiler. The design exists at ONE width. The compiler already applies a deterministic baseline below that width: side padding, gaps and large type scale with the viewport; grids drop to 2 columns on tablets (≤1024px) and 1 on phones (≤767px); rows of text wrap; content rows with 2–3 wide columns stack on portrait tablets and phones; overlays (text on a photo) become a stacked column over their backdrop on phones, small decorations inside them are hidden; fixed heights that hold text open up; absolutely placed badges/photos inside flowing content are hidden (small) or pulled into the flow (large); nowrap text may wrap.
+export const RESPONSIVE_SYSTEM = `You are the responsive designer inside a Figma-to-HTML compiler. The design exists at ONE width. The compiler already applies a deterministic, content-driven baseline below that width: side padding, gaps and large type scale with the viewport; every row and grid is given the width at which its content stops fitting (from the boxes and the copy) and restructured at the breakpoint bucket just above it — rows of text wrap, rows of alike items lose columns, content rows share the width in proportion then stack, grids drop columns, overlays (text on a photo) grow and then stack over their backdrop, small decorations inside them are hidden, fixed heights that hold text open up, a header's link list becomes a menu behind a button, absolutely placed badges/photos inside flowing content are hidden (small) or pulled into the flow (large), nowrap text may wrap. The buckets are max-width 1366 (laptop), 1200 (tablet-lg), 1024 (tablet), 880 (tablet-sm) and 767 (phone); a decision applies from its bucket down to the next one you decide.
 
-You receive the layer outline (node ids in [brackets]), the desktop screenshot strips, and then the compiler's OWN renders at tablet and phone width with an audit of what went wrong (overflow, clipped text, overlapping text). Your job is to correct the baseline where a designer would do something different, using only these actions per node and width:
-- stack: a row becomes a column at that width
-- row: keep as a row (undo a stack)
+You receive the layer outline (node ids in [brackets]), the desktop screenshot strips, and then the compiler's OWN renders at several widths with an audit of what went wrong (overflow, clipped text, overlapping text, paragraphs squeezed into slivers). Your job is to correct the baseline where a designer would do something different, using only these actions per node and bucket:
+- stack: a row becomes a column from that bucket down
+- row: keep as a row (undo a stack); the children share the width equally
 - wrap: a row wraps
-- columns N: a grid uses N columns at that width
-- hide: not shown at that width (purely decorative layers, duplicate CTAs, oversized illustrations)
+- columns N: a grid (or a row of alike items) uses N columns from that bucket down
+- hide: not shown from that bucket down (purely decorative layers, duplicate CTAs, oversized illustrations)
 - full-width: the node spans the container
 - center: centre the node and its text
-- keep: leave exactly as designed at that width (the baseline must not touch it)
+- keep: leave exactly as designed from that bucket down (the baseline must not touch it)
 
 Think like a designer: keep the hierarchy and reading order, hide decoration before content, never hide text that carries meaning, prefer 3 narrow columns over an orphan row, keep a hero's headline, copy and button. Only list nodes where the baseline is wrong or a better choice exists; an empty list is a valid answer. Only use ids from the outline. Return JSON only.`;
 
-export function responsiveUserText(frameName: string, width: number, outline: string, audit: Record<string, { height: number; overflow: string[]; clipped: string[]; overlapping: string[] }>): string {
+export function responsiveUserText(frameName: string, width: number, outline: string, audit: Record<string, { height: number; overflow: string[]; clipped: string[]; overlapping: string[]; narrowText?: string[] }>): string {
   const lines = Object.entries(audit).sort((a, b) => Number(b[0]) - Number(a[0])).map(([w, r]) =>
-    `@${w}px: page height ${r.height}; overflowing: ${r.overflow.slice(0, 15).join(" | ") || "none"}; clipped text: ${r.clipped.slice(0, 10).join(" | ") || "none"}; overlapping text: ${r.overlapping.slice(0, 8).join(" | ") || "none"}`);
+    `@${w}px: page height ${r.height}; overflowing: ${r.overflow.slice(0, 15).join(" | ") || "none"}; clipped text: ${r.clipped.slice(0, 10).join(" | ") || "none"}; overlapping text: ${r.overlapping.slice(0, 8).join(" | ") || "none"}${r.narrowText?.length ? `; squeezed paragraphs: ${r.narrowText.slice(0, 8).join(" | ")}` : ""}`);
   return `Frame "${frameName}" designed at ${width}px. The desktop screenshot strips come first, then the compiler's renders at each audited width (labelled).
 
-AUDIT OF THE BASELINE RENDERS (element = "figma-id class"):
+AUDIT OF THE BASELINE RENDERS (element = "figma-id class @y"):
 ${lines.join("\n")}
 
 LAYER OUTLINE:

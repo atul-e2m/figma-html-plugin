@@ -12,6 +12,8 @@ export interface Rules {
   media: Map<string, Map<string, string>>; // query -> class -> body
   /** `.cls:hover [data-figma-id="x"] { … }` and `.cls:active { … }` */
   stateRules: string[];
+  /** Hover reveals (a layer that fades or slides in) shown outright where there is no hover (touch). */
+  touchRules: string[];
 }
 
 function styleText(s: Style): string {
@@ -22,7 +24,8 @@ function styleText(s: Style): string {
 export function collectRules(frames: ResolvedFrame[]): Rules {
   const rules = new Map<string, string>(), classOf = new Map<string, string>(), hover = new Map<string, string>();
   const media = new Map<string, Map<string, string>>();
-  const stateRules: string[] = [];
+  const stateRules: string[] = [], touchRules: string[] = [];
+  const REVEAL = new Set(["opacity", "visibility", "transform", "top", "left", "right", "bottom", "max-height", "display"]);
   const byBody = new Map<string, string>(); const used = new Set<string>(["page-root"]);
   const alloc = (base: string, body: string): string => {
     const ex = byBody.get(body); if (ex) return ex;
@@ -42,6 +45,11 @@ export function collectRules(frames: ResolvedFrame[]): Rules {
       for (const r of e.stateRules) {
         const sel = r.childId ? `.${cls}:${r.state} [data-figma-id="${r.childId}"]` : `.${cls}:${r.state}`;
         stateRules.push(`${sel} {\n${styleText(r.style)}\n}`);
+        // A child that only appears on hover would be unreachable on a touch screen: show it there.
+        if (r.state === "hover" && r.childId && Object.keys(r.style).some((k) => REVEAL.has(k)) && r.style["opacity"] !== "0" && r.style["display"] !== "none") {
+          const reveal = Object.fromEntries(Object.entries(r.style).filter(([k]) => REVEAL.has(k)));
+          touchRules.push(`  .${cls} [data-figma-id="${r.childId}"] {\n${styleText(reveal).replace(/^/gm, "  ")}\n  }`);
+        }
       }
       for (const [q, st] of Object.entries(e.media)) { if (!media.has(q)) media.set(q, new Map()); media.get(q)!.set(cls, styleText(st)); }
     }
@@ -49,7 +57,7 @@ export function collectRules(frames: ResolvedFrame[]): Rules {
     e.children.forEach(visit);
   };
   for (const f of frames) for (const s of f.sections) visit(s.el);
-  return { rules, classOf, hover, media, stateRules };
+  return { rules, classOf, hover, media, stateRules, touchRules };
 }
 
 /* --------------------------------------------------------------- HTML */
@@ -84,7 +92,10 @@ function renderEl(e: El, R: Rules, indent: string, lazy: boolean): string {
   }
   if (e.tag === "img") {
     attrs.push(`src="${esc(e.src || "")}"`, `alt="${esc(e.attrs["alt"] ?? e.name)}"`);
-    if (lazy) attrs.push(`loading="lazy"`);
+    // Intrinsic size: the browser reserves the box (no layout shift) and keeps the ratio when a
+    // media rule makes the picture fluid. Only when the css sizes both axes, so nothing changes at rest.
+    if (e.style["width"] && e.style["height"] && e.box.w >= 1 && e.box.h >= 1) attrs.push(`width="${Math.round(e.box.w)}"`, `height="${Math.round(e.box.h)}"`);
+    if (lazy) attrs.push(`loading="lazy"`, `decoding="async"`);
     return `${indent}<img ${attrs.join(" ")}>`;
   }
   if (e.tag === "video") {
@@ -104,6 +115,16 @@ function renderEl(e: El, R: Rules, indent: string, lazy: boolean): string {
   }
   if (e.text !== null && !e.children.length) return `${open}${esc(e.text).replace(/\n/g, "<br>")}</${e.tag}>`;
   if (!e.children.length) return `${open}</${e.tag}>`;
+  if (e.attrs["data-menu-row"]) {
+    // Header row: a checkbox drives the menu (no script); the label sits where the link list was.
+    const id = `f2h-menu-${e.id.replace(/[^a-zA-Z0-9]+/g, "-")}`;
+    const parts = [`${indent}  <input type="checkbox" id="${id}" class="f2h-menu-toggle" aria-label="Toggle menu">`];
+    for (const c of e.children) {
+      if (c.attrs["data-menu"]) parts.push(`${indent}  <label for="${id}" class="f2h-menu-btn" aria-hidden="true"><span></span></label>`);
+      parts.push(renderEl(c, R, indent + "  ", lazy));
+    }
+    return `${open}\n${parts.join("\n")}\n${indent}</${e.tag}>`;
+  }
   return `${open}\n${e.children.map((c) => renderEl(c, R, indent + "  ", lazy)).join("\n")}\n${indent}</${e.tag}>`;
 }
 
@@ -181,6 +202,36 @@ function sectionOffsets(f: ResolvedFrame, R: Rules): string[] {
   return out;
 }
 
+/**
+ * Header menus: from the row's bucket down the link list is a panel under the header, opened by
+ * the checkbox. The section it lives in must not clip it and must sit above what follows.
+ */
+function menuRules(frames: ResolvedFrame[]): string[] {
+  const out: string[] = [];
+  const bgOf = (chain: El[]): string => { for (let i = chain.length - 1; i >= 0; i--) { const b = chain[i].style["background-color"]; if (b && b !== "transparent") return b; } return "#fff"; };
+  for (const f of frames) for (const s of f.sections) {
+    const find = (e: El, chain: El[]) => {
+      if (e.attrs["data-menu-row"]) {
+        const at = e.attrs["data-menu-row"], bg = bgOf([...chain, e]), color = e.attrs["data-menu-color"] || "inherit";
+        out.push("", `@media (max-width: ${at}px) {`,
+          `  [data-section="${s.slug}"] { position: relative; z-index: 100; }`,
+          `  [data-section="${s.slug}"] :has([data-menu-row="${at}"]) { overflow: visible; }`,
+          `  [data-menu-row="${at}"] { position: relative; flex-direction: row; flex-wrap: nowrap; align-items: center; }`,
+          `  [data-menu-row="${at}"] > .f2h-menu-btn { display: flex; color: ${color}; margin-left: auto; }`,
+          `  [data-menu-row="${at}"] [data-menu] { display: none; position: absolute; top: 100%; left: 0; right: 0; flex: none; order: 0; width: auto; max-width: none; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0; padding: 8px 24px 20px; background: ${bg}; box-shadow: 0 16px 32px rgba(0, 0, 0, 0.12); }`,
+          `  [data-menu-row="${at}"] [data-menu] ul, [data-menu-row="${at}"] [data-menu] ol { flex-direction: column; align-items: stretch; gap: 0; width: 100%; }`,
+          `  [data-menu-row="${at}"] [data-menu] a, [data-menu-row="${at}"] [data-menu] li > * { display: block; width: 100%; padding: 12px 0; min-height: 44px; }`,
+          `  [data-menu-row="${at}"]:has(.f2h-menu-toggle:checked) [data-menu] { display: flex; }`,
+          `}`);
+        return;
+      }
+      e.children.forEach((c) => find(c, [...chain, e]));
+    };
+    find(s.el, []);
+  }
+  return out;
+}
+
 export function emitCss(frames: ResolvedFrame[], R: Rules, bps: Breakpoint[]): string {
   const out: string[] = [];
   out.push(`/* generated by figma-ir-pipeline */
@@ -193,7 +244,14 @@ h1, h2, h3, h4, h5, h6, p, figure, blockquote, ul, ol { margin: 0; }
 ul, ol { padding: 0; list-style: none; }
 a { color: inherit; text-decoration: none; }
 button { font: inherit; }
-.page-root { position: relative; width: 100%; margin: 0 auto; overflow-x: clip; }`);
+.page-root { position: relative; width: 100%; margin: 0 auto; overflow-x: clip; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; } }
+.f2h-menu-toggle { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.f2h-menu-btn { display: none; width: 44px; height: 44px; flex: 0 0 auto; align-items: center; justify-content: center; cursor: pointer; border-radius: 8px; }
+.f2h-menu-btn span { display: block; width: 24px; height: 2px; background: currentColor; box-shadow: 0 -7px 0 currentColor, 0 7px 0 currentColor; transition: transform 200ms ease, box-shadow 200ms ease; }
+.f2h-menu-toggle:checked ~ .f2h-menu-btn span { transform: rotate(45deg); box-shadow: none; }
+.f2h-menu-toggle:checked ~ .f2h-menu-btn span::after { content: ""; display: block; width: 24px; height: 2px; background: currentColor; transform: rotate(90deg); }
+.f2h-menu-toggle:focus-visible ~ .f2h-menu-btn { outline: 2px solid currentColor; outline-offset: 2px; }`);
   // No cap on the root: sections bleed to the viewport edges and centre their content themselves.
   frames.forEach((f, i) => {
     const extra = Object.entries(f.rootStyle).map(([k, v]) => ` ${k}: ${v};`).join("");
@@ -211,6 +269,8 @@ button { font: inherit; }
     for (const [cls, body] of R.media.get(q)!) out.push(`  .${cls} {\n${body.replace(/^/gm, "  ")}\n  }`);
     out.push("}");
   }
+  out.push(...menuRules(frames));
+  if (R.touchRules.length) out.push("", "@media (hover: none) {", ...R.touchRules, "}");
   if (bps.length > 1) {
     out.push("", "/* breakpoint frames */");
     bps.forEach((bp) => {

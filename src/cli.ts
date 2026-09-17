@@ -9,6 +9,8 @@
  *   f2h verify  <bundle> [--out dir]        render + diff against the Figma screenshot
  *   f2h refine  <bundle> [--out dir]        feed verify measurements back to the planner
  *   f2h build   <bundle> [--no-model] [--refine N] [--out dir]   plan → compile → verify (→ refine → …)
+ *   f2h measure <bundle>                    stack the rows the audit proved too tight (deterministic)
+ *   f2h regress [corpus] [--update] [--only a,b]   rebuild + verify every bundle, compare to baseline.json
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -20,6 +22,8 @@ import type { Plan, ResponsivePlan } from "./ir/plan.ts";
 import { planFrame, refinePlan, responsivePlan } from "./planner/index.ts";
 import { defaultResponsivePlan } from "./planner/default.ts";
 import { compileDocument, compileElementor } from "./compiler/index.ts";
+import { BUCKETS, BUCKET_BY_NAME } from "./compiler/responsive.ts";
+import type { ResponsiveAt } from "./ir/plan.ts";
 import type { VerifyMeasurements } from "./planner/prompt.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -105,9 +109,15 @@ async function cmdPlan(dir: string, flags: Record<string, string | boolean>): Pr
     fs.writeFileSync(planPath(dir, frame.slug), JSON.stringify(plan, null, 2));
     log(`${frame.slug}: ${plan.source} plan, ${plan.sections.length} sections, ${plan.containers.length} containers -> plans/${frame.slug}.plan.json`);
   }
-  if (!fs.existsSync(responsivePath(dir))) {
-    const rp = defaultResponsivePlan(doc);
-    if (rp) { fs.writeFileSync(responsivePath(dir), JSON.stringify(rp, null, 2)); log(`responsive: ${rp.breakpoints.map((b) => `${b.name}@${b.minWidth}`).join(", ")}`); }
+  if (doc.frames.length > 1) {
+    const { plans } = loadPlans(dir, doc);
+    const existing: ResponsivePlan | null = fs.existsSync(responsivePath(dir)) ? JSON.parse(fs.readFileSync(responsivePath(dir), "utf8")) : null;
+    const rp = defaultResponsivePlan(doc, plans);
+    if (rp && !existing) { fs.writeFileSync(responsivePath(dir), JSON.stringify(rp, null, 2)); log(`responsive: ${rp.breakpoints.map((b) => `${b.name}@${b.minWidth}`).join(", ")}; ${rp.sectionPairs.length} section pair(s)`); }
+    else if (rp && existing && !(existing.sectionPairs || []).length && rp.sectionPairs.length) {
+      // Breakpoints are the user's (hand-edited); the pairs are derived and were missing.
+      fs.writeFileSync(responsivePath(dir), JSON.stringify({ ...existing, sectionPairs: rp.sectionPairs }, null, 2)); log(`responsive: ${rp.sectionPairs.length} section pair(s) added`);
+    }
   }
 }
 
@@ -183,6 +193,30 @@ function cmdElementor(dir: string, flags: Record<string, string | boolean>): str
   return out;
 }
 
+interface AuditRow { height: number; overflow: string[]; clipped: string[]; overlapping: string[]; tinyText: string[]; narrowText?: string[]; tapTargets?: string[]; underfilled?: string[]; bleedShort?: string[]; culprits?: Record<string, { kind: "row" | "grid"; problems: string[] }>; score: number }
+
+/**
+ * Widths a frame is audited at: one just above and one well inside every breakpoint bucket
+ * (1366, 1200, 1024, 880, 767, 480) plus the common devices, restricted to the frame's own
+ * breakpoint range and never its design width (verify compares that one to the screenshot).
+ */
+export const AUDIT_LADDER = [2560, 1600, 1440, 1367, 1280, 1201, 1100, 1025, 900, 881, 768, 600, 481, 430, 390, 360, 320];
+const AUDIT_LADDER_QUICK = [2560, 1440, 1367, 1201, 1025, 881, 768, 600, 481, 390, 360];
+export function auditWidths(designW: number, bp: { min: number | null; max: number | null }, allWidths: number[], full = false): number[] {
+  const ladder = full ? AUDIT_LADDER : AUDIT_LADDER_QUICK;
+  const lo = bp.min ?? 0, hi = bp.max ?? Infinity;
+  const widest = Math.max(...allWidths);
+  // The edges of the range are where two frames hand over: always rendered.
+  const edges = [bp.min, bp.max].filter((v): v is number => v !== null && v > 0 && Math.abs(v - designW) >= 24);
+  return [...new Set([...ladder, ...edges])].sort((a, b) => b - a).filter((w) => {
+    if (Math.abs(w - designW) < 24) return false;            // the design width itself
+    if (w < lo || w > hi) return false;                        // another frame serves it
+    if (w > designW && designW >= 1024 && w !== 2560) return false; // a desktop frame above its width only needs the bleed check
+    if (w === 2560 && designW !== widest) return false;
+    return true;
+  });
+}
+
 function cmdVerify(dir: string, flags: Record<string, string | boolean>): Map<string, VerifyMeasurements> {
   const doc = loadBundle(dir);
   const out = typeof flags["out"] === "string" ? flags["out"] : path.join(dir, "out");
@@ -222,23 +256,23 @@ function cmdVerify(dir: string, flags: Record<string, string | boolean>): Map<st
     if (r.status !== 0) { log(`verify failed:\n${r.stderr}`); continue; }
     const m = JSON.parse(fs.readFileSync(path.join(verifyDir, `${f.slug}.report.json`), "utf8")) as VerifyMeasurements;
     results.set(f.id, m);
-    // Responsive audit: only meaningful for a frame that must serve widths it was not designed at.
-    const others = doc.frames.filter((x) => x.id !== f.id).map((x) => x.width);
-    // Narrower widths no other frame serves, plus one wide screen for the widest frame (bleed check).
-    const widest = Math.max(...doc.frames.map((x) => x.width));
-    // 1440 covers the laptop range between the tablet query and a 1920 design; skipped for 1440 designs.
-    const widths = [1440, 1024, 768, 390].filter((w) => w < f.width - 100 && !others.some((o) => Math.abs(o - w) < 200));
-    if (f.width === widest) widths.unshift(2560);
+    // Responsive audit: every width in this frame's breakpoint range that is not its own design
+    // width. Above the design width a phone/tablet frame must stretch; below it everything must
+    // restructure. The ladder straddles every bucket boundary so a transform that fires late shows.
+    const bp = f.breakpoint || { min: null, max: null };
+    const widths = auditWidths(f.width, bp, doc.frames.map((x) => x.width), flags["ladder"] === "full");
     if (widths.length && !flags["no-audit"] && !url) {
-      const ra = spawnSync("python3", [path.join(here, "..", "tools", "audit.py"), "--html", path.join(out, "index.html"), "--bp", f.slug, "--widths", widths.join(","), "--out", path.join(verifyDir, f.slug)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      const ra = spawnSync("python3", [path.join(here, "..", "tools", "audit.py"), "--html", path.join(out, "index.html"), "--bp", f.slug, "--widths", widths.join(","), "--design-width", String(f.width), "--out", path.join(verifyDir, f.slug)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
       if (ra.status !== 0) log(`audit failed:\n${ra.stderr}`);
       else {
-        const audit = JSON.parse(fs.readFileSync(path.join(verifyDir, `${f.slug}.audit.json`), "utf8")) as Record<string, { height: number; overflow: string[]; clipped: string[]; overlapping: string[]; tinyText: string[]; score: number }>;
+        const audit = JSON.parse(fs.readFileSync(path.join(verifyDir, `${f.slug}.audit.json`), "utf8")) as Record<string, AuditRow>;
         (m as unknown as { audit?: unknown }).audit = audit;
-        for (const [w, r] of Object.entries(audit)) {
-          const bs = (r as unknown as { bleedShort?: string[] }).bleedShort || [];
-          log(`  @${w}px: height ${r.height}, overflow ${r.overflow.length}, clipped text ${r.clipped.length}, overlapping text ${r.overlapping.length}, tiny text ${r.tinyText.length}${bs.length ? `, bleed stops short ${bs.length}` : ""}  (score ${r.score})`);
-          for (const b of bs.slice(0, 4)) log(`    ! ${b}`);
+        for (const [w, r] of Object.entries(audit).sort((a, b) => parseInt(b[0], 10) - parseInt(a[0], 10))) {
+          const bs = r.bleedShort || [], nt = r.narrowText || [], tt = r.tapTargets || [], uf = r.underfilled || [];
+          const parts = [`overflow ${r.overflow.length}`, `clipped ${r.clipped.length}`, `overlapping ${r.overlapping.length}`, `tiny ${r.tinyText.length}`];
+          if (nt.length) parts.push(`squeezed ${nt.length}`); if (tt.length) parts.push(`small taps ${tt.length}`); if (uf.length) parts.push(`underfilled`); if (bs.length) parts.push(`bleed short ${bs.length}`);
+          log(`  @${w}px: height ${r.height}, ${parts.join(", ")}  (score ${r.score})`);
+          for (const b of [...bs, ...uf].slice(0, 4)) log(`    ! ${b}`);
         }
       }
     }
@@ -271,6 +305,54 @@ async function cmdRefine(dir: string, flags: Record<string, string | boolean>, m
   return changed;
 }
 
+/**
+ * Deterministic corrections from the audit: a row whose content the browser squeezed, clipped or
+ * pushed out of the viewport at width `w` is stacked from the bucket above `w`. Written into
+ * `plan.responsive` (note `measured@w`), so the next compile is content-driven by measurement.
+ */
+function cmdMeasure(dir: string, flags: Record<string, string | boolean>): boolean {
+  const doc = loadBundle(dir);
+  const out = typeof flags["out"] === "string" ? flags["out"] : path.join(dir, "out");
+  let changed = false;
+  const bucketAbove = (w: number, W: number): ResponsiveAt | null => {
+    const usable = BUCKETS.filter((b) => b < W);
+    for (let i = usable.length - 1; i >= 0; i--) if (usable[i] >= w) return Object.keys(BUCKET_BY_NAME).find((k) => BUCKET_BY_NAME[k] === usable[i]) as ResponsiveAt;
+    return null;
+  };
+  for (const frame of doc.frames) {
+    const pf = planPath(dir, frame.slug), af = path.join(out, "verify", `${frame.slug}.audit.json`);
+    if (!fs.existsSync(pf) || !fs.existsSync(af)) continue;
+    const plan = JSON.parse(fs.readFileSync(pf, "utf8")) as Plan;
+    const audit = JSON.parse(fs.readFileSync(af, "utf8")) as Record<string, AuditRow>;
+    const entries = [...(plan.responsive || [])];
+    const added: string[] = [];
+    for (const [ws, row] of Object.entries(audit)) {
+      const w = parseInt(ws, 10);
+      if (w >= frame.width) continue;
+      const at = bucketAbove(w, frame.width);
+      if (!at) continue; // above the widest bucket: the design-width shares cover it, nothing to stack
+      for (const [id, c] of Object.entries(row.culprits || {})) {
+        if (c.kind !== "row") continue;
+        const serious = c.problems.filter((p) => p === "squeezed" || p === "clipped").length + (c.problems.filter((p) => p === "overflow").length >= 2 ? 1 : 0);
+        if (!serious) continue;
+        const has = entries.some((e) => e.id === id && (e.action === "keep" || ((e.action === "stack" || e.action === "wrap" || e.action === "columns") && (BUCKET_BY_NAME[e.at] ?? 767) >= (BUCKET_BY_NAME[at] ?? 767))));
+        if (has) continue;
+        // One measured entry per row: the widest bucket wins (it covers the narrower ones).
+        for (let i = entries.length - 1; i >= 0; i--) if (entries[i].id === id && entries[i].action === "stack" && entries[i].note.startsWith("measured@") && (BUCKET_BY_NAME[entries[i].at] ?? 767) < (BUCKET_BY_NAME[at] ?? 767)) entries.splice(i, 1);
+        entries.push({ id, at, action: "stack", columns: 0, note: `measured@${w}: ${[...new Set(c.problems)].join(",")}` });
+        added.push(`${id} stack@${at} (${[...new Set(c.problems)].join(",")} at ${w}px)`);
+      }
+    }
+    if (added.length) {
+      fs.writeFileSync(pf, JSON.stringify({ ...plan, responsive: entries }, null, 2));
+      changed = true;
+      log(`${frame.slug}: ${added.length} measured correction(s)`);
+      for (const a of added.slice(0, 12)) log(`  + ${a}`);
+    } else log(`${frame.slug}: no measured corrections`);
+  }
+  return changed;
+}
+
 /** Model pass over the baseline's tablet/phone renders; writes plan.responsive. */
 async function cmdResponsive(dir: string, flags: Record<string, string | boolean>): Promise<boolean> {
   const doc = loadBundle(dir);
@@ -295,6 +377,8 @@ async function cmdBuild(dir: string, flags: Record<string, string | boolean>): P
   await cmdPlan(dir, flags);
   cmdCompile(dir, flags);
   let measured = cmdVerify(dir, flags);
+  // What the browser proved too tight is stacked before the model looks at anything.
+  if (!flags["no-measure"] && cmdMeasure(dir, flags)) { cmdCompile(dir, flags); measured = cmdVerify(dir, flags); }
   // Single-frame designs: let the model correct the responsive baseline once it has seen it.
   const hasKey = !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.OPENROUTER_API_KEY);
   const audited = [...measured.values()].some((m) => (m as unknown as { audit?: unknown }).audit);
@@ -312,6 +396,61 @@ async function cmdBuild(dir: string, flags: Record<string, string | boolean>): P
   }
 }
 
+/* -------------------------------------------------------------- regress */
+
+interface RegressRow { mismatch: number | null; layout: number | null; heightDelta: number; overflow: number; audit: Record<string, number> }
+type Baseline = Record<string, Record<string, RegressRow>>; // bundle -> frame slug -> row
+
+/**
+ * `f2h regress [corpus-dir] [--update] [--only a,b]`: rebuild and verify every bundle under the
+ * corpus (default `v2 tests/`) with the plans on disk, compare against `<corpus>/baseline.json`,
+ * fail on a pixel, layout-only or audit regression. `--update` stores the new numbers.
+ */
+function cmdRegress(corpus: string, flags: Record<string, string | boolean>): void {
+  const only = typeof flags["only"] === "string" ? new Set(flags["only"].split(",")) : null;
+  const bundles = fs.readdirSync(corpus).filter((d) => fs.existsSync(path.join(corpus, d, "ir.json")) && fs.existsSync(path.join(corpus, d, "plans"))).filter((d) => !only || only.has(d)).sort();
+  const baseFile = path.join(corpus, "baseline.json");
+  const base: Baseline = fs.existsSync(baseFile) ? JSON.parse(fs.readFileSync(baseFile, "utf8")) : {};
+  const next: Baseline = { ...base };
+  const failures: string[] = [];
+  const pad = (v: string | number, n: number) => String(v).padStart(n);
+  for (const b of bundles) {
+    const dir = path.join(corpus, b);
+    log(`regress ${b}`);
+    let measured: Map<string, VerifyMeasurements>;
+    try { cmdCompile(dir, { ...flags, out: path.join(dir, "out") }); measured = cmdVerify(dir, { ...flags, out: path.join(dir, "out") }); }
+    catch (e) { failures.push(`${b}: ${(e as Error).message}`); continue; }
+    const doc = loadBundle(dir);
+    next[b] = {};
+    for (const [fid, m] of measured) {
+      const slug = doc.frames.find((f) => f.id === fid)!.slug;
+      const audit = ((m as unknown as { audit?: Record<string, AuditRow> }).audit) || {};
+      const row: RegressRow = {
+        mismatch: (m as unknown as { mismatchPct?: number }).mismatchPct ?? null,
+        layout: (m as unknown as { layoutMismatchPct?: number }).layoutMismatchPct ?? null,
+        heightDelta: m.docHeight - m.expectedHeight, overflow: m.overflowCount,
+        audit: Object.fromEntries(Object.entries(audit).map(([w, r]) => [w, r.score])),
+      };
+      next[b][slug] = row;
+      const prev = base[b]?.[slug];
+      const auditSum = Object.values(row.audit).reduce((a, v) => a + v, 0);
+      const prevAudit = prev ? Object.values(prev.audit).reduce((a, v) => a + v, 0) : null;
+      const line = `  ${slug.padEnd(32)} pixel ${pad(row.mismatch ?? "-", 6)}%  layout ${pad(row.layout ?? "-", 6)}%  height ${pad(row.heightDelta, 5)}  overflow ${pad(row.overflow, 2)}  audit ${pad(auditSum, 3)}` +
+        (prev ? `   (was ${prev.mismatch ?? "-"}% / ${prev.layout ?? "-"}% / audit ${prevAudit})` : "   (new)");
+      log(line);
+      if (prev) {
+        if (row.mismatch !== null && prev.mismatch !== null && row.mismatch > prev.mismatch + 0.3) failures.push(`${b}/${slug}: pixel mismatch ${prev.mismatch}% -> ${row.mismatch}%`);
+        if (row.layout !== null && prev.layout !== null && row.layout > prev.layout + 0.3) failures.push(`${b}/${slug}: layout mismatch ${prev.layout}% -> ${row.layout}%`);
+        if (row.overflow > prev.overflow) failures.push(`${b}/${slug}: overflow ${prev.overflow} -> ${row.overflow}`);
+        for (const [w, sc] of Object.entries(row.audit)) if (prev.audit[w] !== undefined && sc > prev.audit[w]) failures.push(`${b}/${slug}: audit @${w}px ${prev.audit[w]} -> ${sc}`);
+      }
+    }
+  }
+  if (flags["update"] || !fs.existsSync(baseFile)) { fs.writeFileSync(baseFile, JSON.stringify(next, null, 2)); log(`baseline written: ${baseFile}`); }
+  if (failures.length) { log(`${failures.length} regression(s):`); for (const f of failures) log(`  ! ${f}`); if (!flags["update"]) process.exit(1); }
+  else log("no regressions");
+}
+
 /* ----------------------------------------------------------------- main */
 
 async function main() {
@@ -327,9 +466,11 @@ async function main() {
       case "verify": cmdVerify(need(target), flags); break;
       case "refine": await cmdRefine(need(target), flags); break;
       case "responsive": await cmdResponsive(need(target), flags); break;
+      case "measure": cmdMeasure(need(target), flags); break;
       case "build": await cmdBuild(need(target), flags); break;
+      case "regress": cmdRegress(path.resolve(target || path.join(here, "..", "v2 tests")), flags); break;
       default:
-        console.error("usage: f2h <unzip|plan|compile|elementor|verify|refine|responsive|build|raster-list> <bundle-dir> [--no-model] [--provider anthropic|openrouter] [--model id] [--dry-run] [--replan] [--out dir] [--refine N] [--public-base url]");
+        console.error("usage: f2h <unzip|plan|compile|elementor|verify|measure|refine|responsive|build|raster-list|regress> <bundle-dir> [--no-model] [--provider anthropic|openrouter] [--model id] [--dry-run] [--replan] [--out dir] [--refine N] [--public-base url] [--ladder full] [--update] [--only a,b]");
         process.exit(cmd ? 1 : 0);
     }
   } catch (e) { log(`error: ${(e as Error).message}`); process.exit(1); }

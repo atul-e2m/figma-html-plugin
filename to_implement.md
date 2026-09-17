@@ -70,8 +70,28 @@ but the Edwards bundle in `v2 tests/edward-v3` predates it. One re-export verifi
 ## 4. Merged DOM for multi-frame designs (`sectionPairs`)
 
 Case 1 today compiles each frame into its own `.page-root[data-bp]` and switches by media query.
-Merging matched sections of desktop and mobile frames into one DOM (so content is not duplicated
-for crawlers and screen readers) is designed (`sectionPairs` in the responsive plan) but not built.
+`sectionPairs` is now populated (`src/compiler/pairs.ts`, 2026-09-17: slug, then shared copy) and used
+for hints (stacking order and text alignment of the wide frame follow the narrow frame). Merging the
+paired sections into one DOM (so a phone does not download the desktop's images and content is not
+duplicated for crawlers and screen readers) is still to build: pair nodes inside a section by text
+characters / asset file, emit the desktop DOM with the mobile styles as `(max-width: handover)`
+variants where the trees match, fall back to a per-section swap where they do not. This is also what
+gives the Elementor template real mobile variants from the mobile frame (item 7).
+
+## 4b. Responsive follow-ups (after the 2026-09-17 overhaul)
+
+- `srcset`/`sizes`: the compiler knows every picture's rendered width per bucket; the plugin (or a
+  Pillow step at compile time) has to export the smaller sizes. Biggest remaining speed win on phones.
+- Handover choice: a phone frame hands over at 768 and a tablet frame at 1024 by default; picking the
+  handover from the audit (where the stretched narrow frame and the restructured wide frame meet
+  best) is not done.
+- Content inset without padding: a design that insets its footer by fixed widths (no auto-layout
+  padding) touches the viewport edges below the design width (Famous Vineyards footer at 1025).
+- Compositions scaled with container-query units (`scaleTextComposition`) can still clip a caption
+  by a few px at some widths (Coast hero headline, e2m testimonial name); the audit flags them.
+- Decorations positioned by `top` in px inside a flow column (Famous Vineyards pouch images over the
+  cards) keep their offset while the content above reflows; anchoring them to the sibling they sit
+  on is not done.
 
 ## 5. Plan variance guard
 
@@ -80,11 +100,11 @@ different plan wording (fixed in the compiler each time). Design: `build` compil
 and the heuristic plan, verifies both, keeps the better one, and logs the delta; large deltas are
 the signal for a new compiler rule.
 
-## 6. Regression command
+## 6. Regression command — done (2026-09-17)
 
-`f2h regress` — rebuild and verify every bundle under `v2 tests/`, compare against the last stored
-numbers (`v2 tests/baseline.json`), fail on any pixel or layout-only regression above a threshold.
-Today this sweep is run by hand after each rule.
+`f2h regress ["v2 tests"] [--update] [--only a,b]` rebuilds and verifies every bundle, compares
+pixel / layout-only mismatch, overflow and every audit width against `v2 tests/baseline.json`, exits
+1 on any increase. Run it after every compiler rule; `--update` after an accepted change.
 
 ## 7. Elementor V4 emitter — follow-ups
 

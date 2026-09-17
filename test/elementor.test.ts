@@ -115,7 +115,7 @@ test("compileElementor: template shape, element kinds, companion css", () => {
     assert.match(styleIds[0], new RegExp(`^e-${e.id}-[0-9a-f]{7}$`));
     assert.deepEqual(e.settings.classes, { $$type: "classes", value: styleIds });
     assert.equal(e.styles[styleIds[0]].type, "class");
-    for (const v of e.styles[styleIds[0]].variants) { assert.ok(["desktop", "tablet", "mobile"].includes(v.meta.breakpoint)); assert.ok(v.meta.state === null || v.meta.state === "hover"); }
+    for (const v of e.styles[styleIds[0]].variants) { assert.ok(["desktop", "laptop", "tablet_extra", "tablet", "mobile_extra", "mobile"].includes(v.meta.breakpoint)); assert.ok(v.meta.state === null || v.meta.state === "hover"); }
     if (e.elType !== "widget") assert.ok(e.styles[styleIds[0]].variants[0].props.padding, `${e.editor_settings.title}: containers always override the 10px base padding`);
     if (e.elType !== "widget") assert.ok(e.styles[styleIds[0]].variants[0].props.display, `${e.editor_settings.title}: containers always set display`);
   }

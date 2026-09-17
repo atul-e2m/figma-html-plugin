@@ -158,7 +158,7 @@ test("hover variant that reorders and drops layers pairs children by name", () =
   assert.doesNotMatch(css, /\.button:hover \{[^}]*height/s, "same-size variant adds no root size delta");
 });
 
-test("four small counters wrap 2-up on portrait tablets with the full gap expression", () => {
+test("four small counters wrap 2-up where they stop fitting, with the full gap expression", () => {
   const { doc } = makeSample();
   const frame = doc.frames[0];
   const counters = Array.from({ length: 4 }, (_, i) => col(`Counter 0${i + 1}`, 160 + i * 300, 3000, 220, 100, 10, [0, 0, 0, 0], [
@@ -170,8 +170,10 @@ test("four small counters wrap 2-up on portrait tablets with the full gap expres
   const plan = defaultPlan(frame);
   const out = compileDocument(doc, new Map([[frame.id, plan]]));
   const css = out.files.get("styles.css")!;
-  const m900 = css.slice(css.indexOf("@media (max-width: 900px)"), css.indexOf("@media (max-width: 767px)"));
-  assert.match(m900, /\.counter-01 \{[^}]*flex: 0 0 calc\(50% - min\([^)]*\) \/ 2\)/s, "basis subtracts the fluid gap expression, not its last token");
+  // Four 220px counters with an 80px gap need ~1120 of the 1440 row: they wrap 2-up from the 1200 bucket.
+  const m = css.slice(css.indexOf("@media (max-width: 1200px)"), css.indexOf("@media (max-width: 1024px)"));
+  assert.match(m, /\.counter-01 \{[^}]*flex: 0 0 calc\(50% - min\([^)]*\) \* 0\.5\)/s, "basis subtracts the fluid gap expression, not its last token");
+  assert.doesNotMatch(css, /@media \(max-width: 1366px\) \{[^@]*\.counters \{/s, "not before they need to");
 });
 
 test("two frames compile to breakpoint wrappers", () => {

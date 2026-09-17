@@ -43,7 +43,10 @@ export interface PlanBreakpoint {
 }
 
 export type ResponsiveAction = "stack" | "wrap" | "row" | "hide" | "columns" | "full-width" | "center" | "keep";
-export interface ResponsiveEntry { id: string; at: "tablet" | "phone"; action: ResponsiveAction; columns: number; note: string }
+/** Breakpoint buckets a decision can fire at (max-width): laptop 1366, tablet-lg 1200, tablet 1024, tablet-sm 880, phone 767. */
+export type ResponsiveAt = "laptop" | "tablet-lg" | "tablet" | "tablet-sm" | "phone";
+export const RESPONSIVE_ATS: readonly ResponsiveAt[] = ["laptop", "tablet-lg", "tablet", "tablet-sm", "phone"];
+export interface ResponsiveEntry { id: string; at: ResponsiveAt; action: ResponsiveAction; columns: number; note: string }
 
 export interface Plan {
   schema: typeof PLAN_SCHEMA_ID;
@@ -178,7 +181,8 @@ export function normalizeResponsive(raw: unknown, knownIds: Set<string>): Respon
   const out: ResponsiveEntry[] = [];
   for (const e of (Array.isArray(raw) ? raw : []) as Array<Partial<ResponsiveEntry>>) {
     if (!e || typeof e.id !== "string" || !knownIds.has(e.id)) continue;
-    const at = e.at === "tablet" ? "tablet" : "phone";
+    const rawAt = String(e.at || "");
+    const at: ResponsiveAt = (RESPONSIVE_ATS as readonly string[]).includes(rawAt) ? (rawAt as ResponsiveAt) : rawAt === "desktop" ? "laptop" : "phone";
     const action = RESPONSIVE_ACTIONS.has(String(e.action)) ? (e.action as ResponsiveAction) : null;
     if (!action) continue;
     out.push({ id: e.id, at, action, columns: action === "columns" && typeof e.columns === "number" && e.columns > 0 ? Math.round(e.columns) : 0, note: String(e.note || "") });
@@ -196,7 +200,7 @@ export const RESPONSIVE_JSON_SCHEMA = {
         type: "object", additionalProperties: false, required: ["id", "at", "action", "columns", "note"],
         properties: {
           id: { type: "string", description: "Node id from the outline." },
-          at: { type: "string", enum: ["tablet", "phone"], description: "tablet = up to 1024px wide; phone = up to 767px." },
+          at: { type: "string", enum: ["laptop", "tablet-lg", "tablet", "tablet-sm", "phone"], description: "Viewport bucket the action applies from, downwards: laptop = up to 1366px; tablet-lg = up to 1200px; tablet = up to 1024px; tablet-sm = up to 880px; phone = up to 767px." },
           action: { type: "string", enum: ["stack", "wrap", "row", "hide", "columns", "full-width", "center", "keep"] },
           columns: { type: "integer", description: "Only for action=columns (grid column count at that width). 0 otherwise." },
           note: { type: "string" },

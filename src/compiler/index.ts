@@ -6,7 +6,8 @@ import { walk, type IRDocument, type IRFrame } from "../ir/schema.ts";
 import type { Plan, ResponsivePlan } from "../ir/plan.ts";
 import { resolveFrame, type ResolvedFrame } from "./resolve.ts";
 import { collectRules, emitHtml, emitCss, fontFaces, type Breakpoint } from "./emit.ts";
-import { applyResponsive, pruneMedia } from "./responsive.ts";
+import { applyResponsive, pruneMedia, stretchFrame } from "./responsive.ts";
+import { frameHints } from "./pairs.ts";
 import { emitElementor, type ElementorOptions, type ElementorReport } from "./elementor.ts";
 
 export interface CompileOptions {
@@ -83,9 +84,14 @@ export function resolveDocument(doc: IRDocument, plans: Map<string, Plan>, opts:
     if (!plan) throw new Error(`no plan for frame ${frame.id} (${frame.name})`);
     const rf = resolveFrame(doc, frame, plan, { assetPrefix, inlineSvg: opts.inlineSvg ?? true });
     debugNode(rf, "after resolve");
-    const ridx = new Map<string, Array<{ at: "tablet" | "phone"; action: import("./responsive.ts").ResponsiveAction; columns?: number }>>();
+    const ridx = new Map<string, Array<{ at: string; action: import("./responsive.ts").ResponsiveAction; columns?: number }>>();
     for (const r of plan.responsive || []) { if (!ridx.has(r.id)) ridx.set(r.id, []); ridx.get(r.id)!.push({ at: r.at, action: r.action, columns: r.columns || undefined }); }
-    applyResponsive(rf.sections, frame.width, ridx);
+    // The next narrower frame of the same page is the designer's own answer to "how does this
+    // stack": its order and alignment drive this frame's restructuring below its width.
+    const narrower = [...doc.frames].filter((f) => f.width < frame.width && plans.has(f.id)).sort((a, b) => b.width - a.width)[0];
+    const hints = narrower ? frameHints(frame, plan, narrower, plans.get(narrower.id)!, (opts.responsive?.sectionPairs || []).filter((p) => p.a && p.b)) : null;
+    applyResponsive(rf.sections, frame.width, ridx, hints);
+    stretchFrame(rf.sections, frame.width, { min: bps[i].min ?? 0, max: bps[i].max });
     debugNode(rf, "after responsive");
     pruneMedia(rf.sections, frame.width, { min: bps[i].min ?? 0, max: bps[i].max });
     resolved.push(rf);

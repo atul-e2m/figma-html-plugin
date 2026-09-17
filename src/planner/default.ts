@@ -7,6 +7,7 @@
  */
 import { type IRDocument, type IRFrame, type IRNode, slugify, walk } from "../ir/schema.ts";
 import { PLAN_SCHEMA_ID, type Plan, type ResponsivePlan } from "../ir/plan.ts";
+import { pairAllSections } from "../compiler/pairs.ts";
 
 function roleFromName(name: string): string {
   const n = name.toLowerCase();
@@ -81,7 +82,7 @@ export function defaultPlan(frame: IRFrame): Plan {
   };
 }
 
-export function defaultResponsivePlan(doc: IRDocument): ResponsivePlan | null {
+export function defaultResponsivePlan(doc: IRDocument, plans?: Map<string, Plan>): ResponsivePlan | null {
   if (doc.frames.length < 2) return null;
   const sorted = [...doc.frames].sort((a, b) => a.width - b.width);
   const breakpoints = sorted.map((f, i) => {
@@ -90,5 +91,5 @@ export function defaultResponsivePlan(doc: IRDocument): ResponsivePlan | null {
     const name = f.width <= 500 ? "mobile" : f.width <= 1024 ? "tablet" : "desktop";
     return { name, minWidth, frameId: f.id };
   });
-  return { schema: "figma-responsive-plan/1", breakpoints, sectionPairs: [] };
+  return { schema: "figma-responsive-plan/1", breakpoints, sectionPairs: plans ? pairAllSections(doc, plans) : [] };
 }

@@ -13,11 +13,11 @@
  *
  * Styles are V4 "local classes": one style definition per element with a desktop
  * variant, a hover variant and tablet / mobile variants (Elementor's default
- * breakpoints are max-width 1024 and 767, which is exactly what responsive.ts
+ * breakpoints (laptop 1366, tablet_extra 1200, tablet 1024, mobile_extra 880, mobile 767) are the buckets responsive.ts
  * emits). Every CSS declaration the V4 style schema can express is written as a
  * typed prop value ($$type / value) so the client can edit it in the editor.
- * Declarations the schema has no control for (white-space, text-box-trim, a
- * 900px media query, descendant hover deltas, styled text runs...) go to a
+ * Declarations the schema has no control for (white-space, text-box-trim, the
+ * design-width share query, descendant hover deltas, styled text runs...) go to a
  * companion stylesheet keyed by the element's `_cssid` attribute, which survives
  * the id regeneration Elementor does on import.
  *
@@ -479,7 +479,8 @@ export interface ElementorOutput {
   report: ElementorReport;
 }
 
-const MEDIA_BREAKPOINT: Record<string, string> = { "(max-width: 1024px)": "tablet", "(max-width: 767px)": "mobile" };
+/** responsive.ts buckets -> Elementor device names. laptop/tablet_extra/mobile_extra must be active in the Kit (tools/elementor_deploy.sh enables them). */
+const MEDIA_BREAKPOINT: Record<string, string> = { "(max-width: 1366px)": "laptop", "(max-width: 1200px)": "tablet_extra", "(max-width: 1024px)": "tablet", "(max-width: 880px)": "mobile_extra", "(max-width: 767px)": "mobile" };
 const CONTAINER_TAGS = new Set(["div", "header", "section", "article", "aside", "footer"]);
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
