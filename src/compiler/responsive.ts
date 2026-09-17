@@ -32,6 +32,14 @@ const gapExprOf = (e: El, fallback = "0px"): string => { const g = e.style["gap"
 const media = (e: El, q: string, st: Record<string, string>) => { e.media[q] = { ...(e.media[q] || {}), ...st }; };
 const decided = (idx: ResponsiveIndex, e: El, at: "tablet" | "phone"): ResponsiveDecision[] => (idx.get(e.id) || []).filter((d) => d.at === at);
 const keep = (idx: ResponsiveIndex, e: El, at: "tablet" | "phone") => decided(idx, e, at).some((d) => d.action === "keep");
+/**
+ * A layer parked entirely outside its clipping parent (a hover-reveal excerpt
+ * or arrow button that slides in) is invisible by design. Once the overlay
+ * restacks or grows it must stay hidden instead of joining the flow.
+ */
+const restsOutside = (k: El, e: El): boolean =>
+  e.style["overflow"] === "hidden" && k.style["position"] === "absolute" &&
+  (k.box.y >= e.box.h - 1 || k.box.x >= e.box.w - 1 || k.box.y + k.box.h <= 1 || k.box.x + k.box.w <= 1);
 
 /* ------------------------------------------------------------ fluid */
 
@@ -73,6 +81,7 @@ function fluidAbsolute(e: El, W: number): void {
 }
 
 function fluidType(e: El, W: number): void {
+  if (compositionText.has(e)) return;
   const fs = num(e.style["font-size"]);
   if (fs === null || fs < 28) return;
   const min = Math.round(fs * 0.6);
@@ -101,11 +110,13 @@ function collapseGrid(e: El, idx: ResponsiveIndex): void {
 }
 
 /** Text-ish rows (nav links, tags, meta) wrap; content rows stack. */
-function rows(e: El, depth: number, idx: ResponsiveIndex): void {
+function rows(e: El, depth: number, idx: ResponsiveIndex, W: number): void {
   if (e.style["display"] !== "flex" || e.style["flex-direction"] !== "row") return;
   const kids = e.children.filter((c) => c.style["position"] !== "absolute");
   if (kids.length < 2) return;
-  const gap = num(e.style["gap"]?.split(/\s+/).pop()) || 0;
+  // The design gap in px; a fluid gap `min(123px, 6.41vw)` counts as 123.
+  const gapToken = e.style["gap"]?.includes("(") ? e.style["gap"] : e.style["gap"]?.split(/\s+/).pop();
+  const gap = num(gapToken) ?? parseFloat((gapToken || "").match(/([\d.]+)px/)?.[1] || "0") ?? 0;
   const total = kids.reduce((n, k) => n + k.box.w, 0) + gap * (kids.length - 1);
   const forced = decided(idx, e, "phone").find((d) => d.action === "stack" || d.action === "wrap" || d.action === "row");
   const tall = Math.max(...kids.map((k) => k.box.h));
@@ -140,12 +151,27 @@ function rows(e: El, depth: number, idx: ResponsiveIndex): void {
         for (const k of kids) media(k, TABLET_SM, { flex: `0 0 calc(50% - ${gapExpr} / 2)`, "max-width": "100%" });
       }
     } else {
+      // A row whose columns fill it at the design width has no slack below it: on a 1920 design
+      // the columns keep their designed proportions from the design width down (a 1440 laptop
+      // used to show the right column cut off), otherwise only from the tablet query.
+      const contentW = Math.max(1, e.box.w - sidePadding(e.style["padding"]));
+      const fills = total >= contentW * 0.95 || e.style["justify-content"] === "space-between";
+      const q = W > 1440 && fills ? `(max-width: ${W - 1}px)` : TABLET;
       const weights = kids.map((k) => Math.max(1, Math.round(k.box.w)));
+      const padR = sidePadding(e.style["padding"]) / 2;
       kids.forEach((k, i) => {
-        media(k, TABLET, { flex: `${weights[i]} 1 0%`, "min-width": "0", width: "auto", "max-width": "100%" });
-        if (k.style["display"] === "flex" && k.style["flex-direction"] === "row" && !k.style["flex-wrap"]) media(k, TABLET, { "flex-wrap": "wrap", "row-gap": "8px" });
+        // A small picture (logo, icon) keeps its designed size; `width: auto` would let the
+        // browser crop or restretch it. The columns around it share the rest.
+        const smallAsset = (k.tag === "img" || k.tag === "svg" || k.tag === "video" || (k.hasAsset && !hasText(k))) && k.box.w < 300;
+        if (smallAsset) { media(k, q, { flex: "0 0 auto", "max-width": "100%" }); return; }
+        media(k, q, { flex: `${weights[i]} 1 0%`, "min-width": "0", width: "auto", "max-width": "100%" });
+        if (k.style["display"] === "flex" && k.style["flex-direction"] === "row" && !k.style["flex-wrap"]) {
+          // A row that ends at the right edge (a link list with its CTA) keeps that edge when it wraps.
+          const endAligned = k.box.x + k.box.w >= e.box.w - padR - 2;
+          media(k, q, { "flex-wrap": "wrap", "row-gap": "8px", ...(endAligned ? { "justify-content": "flex-end" } : {}) });
+        }
       });
-      fluidImages(e);
+      fluidImages(e, q);
     }
   }
 }
@@ -168,13 +194,13 @@ function stackRow(e: El, q: string): void {
 }
 
 /** Images inside a shared row keep their ratio and fill their column. */
-function fluidImages(e: El): void {
+function fluidImages(e: El, q: string = TABLET): void {
   const visit = (k: El, parent: El) => {
     const w = num(k.style["width"]), h = num(k.style["height"]);
     // Only a picture that carries its column goes fluid; an avatar or icon beside text keeps its size.
     const fills = k.box.w >= parent.box.w * 0.5;
-    if ((k.tag === "img" || k.tag === "video") && w !== null && fills && k.style["position"] !== "absolute") media(k, TABLET, { width: "100%", "max-width": px(Math.round(k.box.w)), height: "auto", ...(h ? { "aspect-ratio": `${Math.round(w)} / ${Math.round(h)}` } : {}) });
-    else if (!k.isText && w !== null && w >= 200 && fills && k.style["position"] !== "absolute") media(k, TABLET, { width: "100%" });
+    if ((k.tag === "img" || k.tag === "video") && w !== null && fills && k.style["position"] !== "absolute") media(k, q, { width: "100%", "max-width": px(Math.round(k.box.w)), height: "auto", ...(h ? { "aspect-ratio": `${Math.round(w)} / ${Math.round(h)}` } : {}) });
+    else if (!k.isText && w !== null && w >= 200 && fills && k.style["position"] !== "absolute") media(k, q, { width: "100%" });
     if (k.tag !== "img" && k.tag !== "video") k.children.forEach((c) => visit(c, k));
   };
   e.children.forEach((c) => visit(c, e));
@@ -188,12 +214,13 @@ function stackOverlay(e: El, idx: ResponsiveIndex, topInset = 0, q: string = PHO
   const kids = e.children;
   const area = Math.max(1, e.box.w * e.box.h);
   const covering = (k: El) => (k.box.w * k.box.h) / area >= 0.85 && !hasText(k);
-  const content = kids.filter((k) => k.role !== "backdrop" && hasText(k));
+  const content = kids.filter((k) => k.role !== "backdrop" && hasText(k) && !restsOutside(k, e));
   if (!content.length && !force) return; // pure decoration: leave as designed (it scales with the box)
   const h = num(e.style["height"]) || num(e.style["min-height"]) || e.box.h;
   const pad = q === PHONE ? "16px" : "24px";
   media(e, q, { display: "flex", "flex-direction": "column", "align-items": "stretch", gap: "16px", height: "auto", "min-height": px(Math.min(h, 320)), padding: `${px(32 + topInset)} ${pad} 32px`, "aspect-ratio": "auto" });
   for (const k of kids) {
+    if (restsOutside(k, e)) { media(k, q, { display: "none" }); continue; }
     if (k.role === "backdrop" || covering(k)) { media(k, q, { position: "absolute", inset: "0", width: "100%", height: "100%", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", "max-width": "none" }); continue; }
     const wide = k.box.w >= e.box.w * 0.85 && k.box.h <= 120 && k.hasAsset; // torn edges, dividers
     if (wide) continue;
@@ -205,6 +232,18 @@ function stackOverlay(e: El, idx: ResponsiveIndex, topInset = 0, q: string = PHO
     }
     media(k, q, { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", width: "100%", "max-width": "100%", height: "auto", "min-height": "0", margin: "0", "z-index": k.style["z-index"] || "1" });
   }
+}
+
+/**
+ * Display type set tighter than its glyphs (a 150px "2012" on a 70px line) or painted
+ * through `background-clip: text` is cut to its line box once the trim is lifted: keep it trimmed.
+ */
+function tightLeading(e: El): boolean {
+  if (e.style["background-clip"] === "text" || e.style["-webkit-background-clip"] === "text") return true;
+  const lh = e.style["line-height"]; if (!lh) return false;
+  if (/^[\d.]+$/.test(lh)) return parseFloat(lh) < 1;
+  const l = num(lh), f = num(e.style["font-size"]);
+  return l !== null && f !== null && l < f;
 }
 
 /** Fixed heights that hold text open up on phones; nowrap text wraps; fixed images go fluid. */
@@ -222,6 +261,14 @@ function loosen(e: El, idx: ResponsiveIndex): void {
     }
   }
   if (e.isText && e.style["white-space"] === "nowrap" && e.box.w > 120) media(e, PHONE, { "white-space": "normal" });
+  // Leading trim cuts a text box to cap height and baseline; the designer spaced the
+  // desktop around that. Below the design width gaps shrink and blocks stack flush, so the
+  // descenders of one line would touch (or be clipped against) the next block: give the
+  // lines their half-leading back. Compositions keep it (their layers are placed by the trimmed box).
+  if (e.isText && e.style["text-box-trim"] && !compositionText.has(e) && !tightLeading(e)) media(e, TABLET, { "text-box-trim": "none" });
+  // A text that overhangs its column by design (negative margins) has nowhere to hang
+  // once the column is narrower than a phone: it spans the column instead.
+  if (e.isText && ((e.style["margin-left"] || "").startsWith("-") || (e.style["margin-right"] || "").startsWith("-"))) media(e, TABLET, { width: "100%", "max-width": "100%", "margin-left": "0", "margin-right": "0" });
   if (e.isText && e.style["white-space"] === "nowrap" && e.box.w > 240) media(e, TABLET, { "white-space": "normal" }); // a long single line (copyright, tagline) wraps rather than clips
   const w = num(e.style["width"]);
   // A hug container wider than a phone (its children carry the width) must be allowed to shrink.
@@ -258,10 +305,58 @@ export function pictureLike(e: El): boolean {
  * polaroid stack) scales as ONE picture: percentage offsets inside a box that
  * keeps the design's aspect ratio. Exact at the design width, fluid below it.
  */
-function scaleComposition(e: El): void {
+/** Horizontal padding in px from a padding shorthand; fluid tokens `min(Apx, Bvw)` count as A. */
+function sidePadding(padding: string | undefined): number {
+  if (!padding) return 0;
+  const tokens = padding.match(/min\([^)]*\)|[-\d.]+px|0/g) || [];
+  const pxOf = (t: string) => { const m = t.match(/([\d.]+)px/); return m ? parseFloat(m[1]) : 0; };
+  const v = tokens.map(pxOf);
+  if (v.length === 1) return v[0] * 2;
+  if (v.length === 2 || v.length === 3) return v[1] * 2;
+  if (v.length >= 4) return v[1] + v[3];
+  return 0;
+}
+/** `cqw` is a share of the query container's CONTENT box: the design width minus its side padding. */
+const cqBase = (e: El, W: number): number => Math.max(1, W - sidePadding(e.style["padding"]));
+
+/** Text inside a self-scaling composition: fluidType leaves it alone (its size follows the composition). */
+const compositionText = new WeakSet<El>();
+
+/**
+ * A small composition that holds text (a headline drawn as separate lines plus a highlight
+ * block, a badge with a caption): its text, offsets and sizes are a share of its own width
+ * (container-query units), so the layers stay aligned whatever the viewport does to the box.
+ * Full-width compositions are excluded: they restack on phones instead of shrinking their type.
+ */
+function scaleTextComposition(e: El, frameW: number): void {
+  const W = num(e.style["width"]);
+  if (W === null || W < 120 || W > frameW * 0.6 || !hasText(e)) return;
+  e.style["container-type"] = "inline-size";
+  const base = cqBase(e, W);
+  const cq = (v: number) => `${Math.round((v / base) * 10000) / 100}cqw`;
+  // Only layers placed by coordinates scale with the box; flowing columns (a footer's link lists)
+  // keep their type and reflow like any flow content.
+  const visitLeaf = (k: El, depth: number, positioned = false) => {
+    const st = k.style;
+    positioned = positioned || (depth > 0 && st["position"] === "absolute");
+    if (!positioned) { k.children.forEach((c) => visitLeaf(c, depth + 1, false)); return; }
+    if (st["position"] === "absolute") for (const prop of ["left", "top", "right", "bottom"] as const) { const v = num(st[prop]); if (v !== null && v !== 0) st[prop] = cq(v); }
+    for (const prop of ["width", "height", "min-height"] as const) { const v = num(st[prop]); if (v !== null && v > 0) st[prop] = cq(v); }
+    if (k.isText) {
+      const fs = num(st["font-size"]); if (fs !== null) st["font-size"] = `clamp(9px, ${cq(fs)}, ${px(fs)})`;
+      const lh = num(st["line-height"]); if (lh !== null) st["line-height"] = `clamp(11px, ${cq(lh)}, ${px(lh)})`;
+      const ls = num(st["letter-spacing"]); if (ls !== null && ls !== 0) st["letter-spacing"] = cq(ls);
+      compositionText.add(k);
+    }
+    k.children.forEach((c) => visitLeaf(c, depth + 1, true));
+  };
+  visitLeaf(e, 0);
+}
+
+function scaleComposition(e: El, frameW = Infinity): void {
   if (e.layoutKind !== "absolute" && e.layoutKind !== "overlay") return;
   const picture = pictureLike(e);
-  if (hasText(e) && !picture) return;
+  if (hasText(e) && !picture) { scaleTextComposition(e, frameW); return; }
   const W = e.box.w, H = e.box.h;
   if (W < 120 || H < 60 || !e.children.length) return;
   const kids = e.children.filter((k) => k.style["position"] === "absolute");
@@ -286,13 +381,14 @@ function scaleComposition(e: El): void {
   const designW = num(es["width"]) ?? W;
   // Design width capped by the container. Not `width: 100%`: inside a hug (shrink-to-fit) parent a
   // percentage resolves to auto and an aspect-ratio box then collapses to its captions' width.
-  es["width"] = px(designW); es["max-width"] = "100%"; es["height"] = "auto"; es["aspect-ratio"] = `${Math.round(W)} / ${Math.round(H)}`;
-  delete es["min-height"];
+  if (e.attrs["data-bleed"]) { es["height"] = "auto"; es["aspect-ratio"] = `${Math.round(W)} / ${Math.round(H)}`; delete es["min-height"]; }
+  else { es["width"] = px(designW); es["max-width"] = "100%"; es["height"] = "auto"; es["aspect-ratio"] = `${Math.round(W)} / ${Math.round(H)}`; delete es["min-height"]; } // a bleed layer keeps left:0/right:0
   if (!picture) return;
   // Tablets: the captions shrink with the picture. Container-query units make a
   // caption's type and fixed widths a share of the picture's width; exact at the design width.
   es["container-type"] = "inline-size";
-  const cq = (v: number) => `${Math.round((v / W) * 10000) / 100}cqw`;
+  const cqb = cqBase(e, W);
+  const cq = (v: number) => `${Math.round((v / cqb) * 10000) / 100}cqw`;
   const scaleLeaf = (k: El) => {
     const st: Record<string, string> = {}, reset: Record<string, string> = {};
     const fs = num(k.style["font-size"]);
@@ -358,6 +454,23 @@ function absoluteInFlow(e: El): void {
   }
 }
 
+/**
+ * A full-width edge strip pinned by `top` in the lower fifth of its container (a ruler,
+ * a torn edge, a fade) must follow the bottom edge when the container grows taller than
+ * designed below the design width. Measured from the bottom it lands on the same pixel
+ * at the design width.
+ */
+function anchorEdgeStrips(e: El): void {
+  if (e.box.h <= 0) return;
+  for (const k of e.children) {
+    if (k.style["position"] !== "absolute" || hasText(k) || k.style["bottom"] !== undefined) continue;
+    const t = num(k.style["top"]); if (t === null) continue;
+    const fullBleed = k.box.w >= e.box.w * 0.85 && k.box.h <= Math.max(120, e.box.h * 0.25);
+    if (!fullBleed || k.box.y + k.box.h < e.box.h * 0.8) continue;
+    media(k, TABLET, { top: "auto", bottom: px(Math.max(0, Math.round(e.box.h - (k.box.y + k.box.h)))) });
+  }
+}
+
 const INFLOW: Record<string, string> = { position: "relative", inset: "auto", left: "auto", right: "auto", top: "auto", bottom: "auto", transform: "none", margin: "0" };
 
 function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
@@ -387,7 +500,14 @@ function applyDecisions(e: El, idx: ResponsiveIndex, topInset: number): void {
         }
         break;
       }
-      case "center": media(e, q, { "align-self": "center", "margin-left": "auto", "margin-right": "auto", "text-align": "center", "align-items": "center", "justify-content": "center" }); break;
+      case "center": {
+        media(e, q, { "align-self": "center", "margin-left": "auto", "margin-right": "auto", "text-align": "center", "align-items": "center", "justify-content": "center" });
+        // Text layers carry their own alignment (a right-aligned column mirrored across the axis);
+        // "centre" means the copy too, not only the boxes.
+        const centreText = (k: El) => { if (k.isText && k.style["text-align"] && k.style["text-align"] !== "center") media(k, q, { "text-align": "center" }); if (k.style["display"] === "flex") media(k, q, { "align-items": "center" }); k.children.forEach(centreText); };
+        e.children.forEach(centreText);
+        break;
+      }
       case "stack":
         if (composition && pictureLike(e)) break; // a collage scales as one picture; its captions already stack on phones
         if (composition) stackOverlay(e, idx, topInset, q, true);
@@ -461,8 +581,9 @@ export function pruneMedia(sections: Section[], W: number, range: { min: number;
 function overlayGrow(e: El, idx: ResponsiveIndex): void {
   if (e.layoutKind !== "overlay" && e.layoutKind !== "absolute") return;
   if (keep(idx, e, "tablet") || pictureLike(e)) return;
+  for (const k of e.children) if (restsOutside(k, e)) media(k, TABLET, { display: "none" });
   const big = e.children
-    .filter((k) => k.style["position"] === "absolute" && k.role !== "backdrop" && hasText(k) && k.box.w >= e.box.w * 0.5)
+    .filter((k) => k.style["position"] === "absolute" && k.role !== "backdrop" && hasText(k) && k.box.w >= e.box.w * 0.5 && !restsOutside(k, e))
     .sort((a, b) => a.box.y - b.box.y);
   if (!big.length) return;
   const h = num(e.style["height"]) || num(e.style["min-height"]) || e.box.h;
@@ -476,15 +597,15 @@ function overlayGrow(e: El, idx: ResponsiveIndex): void {
     prevBottom = k.box.y + k.box.h;
   }
   // Whatever sits below the last grown layer keeps its distance from the bottom.
-  const tail = e.children.filter((k) => k.style["position"] === "absolute" && !big.includes(k) && k.role !== "backdrop" && k.box.y >= prevBottom - 1 && hasText(k));
+  const tail = e.children.filter((k) => k.style["position"] === "absolute" && !big.includes(k) && k.role !== "backdrop" && k.box.y >= prevBottom - 1 && hasText(k) && !restsOutside(k, e));
   for (const k of tail) media(k, TABLET, { top: "auto", bottom: px(Math.max(0, e.box.h - (k.box.y + k.box.h))) });
 }
 
 export function applyResponsive(sections: Section[], W: number, idx: ResponsiveIndex = new Map()): void {
   const visit = (e: El, depth: number, topInset: number) => {
     fluidPadding(e, W); fluidGap(e, W); fluidAbsolute(e, W); fluidType(e, W);
-    collapseGrid(e, idx); rows(e, depth, idx); overlayGrow(e, idx); stackOverlay(e, idx, topInset); loosen(e, idx); shrinkHug(e);
-    if (!keep(idx, e, "phone")) { scaleComposition(e); absoluteInFlow(e); panelsInFlow(e); }
+    collapseGrid(e, idx); rows(e, depth, idx, W); overlayGrow(e, idx); stackOverlay(e, idx, topInset); loosen(e, idx); shrinkHug(e);
+    if (!keep(idx, e, "phone")) { scaleComposition(e, W); anchorEdgeStrips(e); absoluteInFlow(e); panelsInFlow(e); }
     applyDecisions(e, idx, topInset);
     e.children.forEach((c) => visit(c, depth + 1, c.role === "inner" ? topInset : 0));
   };

@@ -37,7 +37,7 @@ const progress = (message: string, pct: number) => figma.ui.postMessage({ type: 
  * content exports with every overflowing child included (shadows, bleeding
  * photos), which shifts the origin; export a clipped clone in that case.
  */
-async function screenshot(frame: SceneNode): Promise<{ bytes: Uint8Array; scale: number } | null> {
+async function screenshot(frame: SceneNode): Promise<{ bytes: Uint8Array; scale: number; box: { x: number; y: number; w: number; h: number } } | null> {
   const clips = !!(frame as unknown as { clipsContent?: boolean }).clipsContent;
   let target: SceneNode = frame;
   let clone: SceneNode | null = null;
@@ -50,7 +50,13 @@ async function screenshot(frame: SceneNode): Promise<{ bytes: Uint8Array; scale:
     for (const scale of [1, 0.5, 0.25]) {
       try {
         const bytes = await ex.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: scale } });
-        return { bytes, scale };
+        // The PNG covers the target's render bounds (its own effects pad the box); record that
+        // box relative to the frame so verify aligns the pixels exactly.
+        const rb = (target as unknown as { absoluteRenderBounds?: Rect | null }).absoluteRenderBounds;
+        const bb = (target as unknown as { absoluteBoundingBox?: Rect | null }).absoluteBoundingBox;
+        const box = rb && bb ? { x: Math.round(rb.x - bb.x), y: Math.round(rb.y - bb.y), w: Math.round(rb.width), h: Math.round(rb.height) }
+          : { x: 0, y: 0, w: Math.round((frame as LayoutMixin).width), h: Math.round((frame as LayoutMixin).height) };
+        return { bytes, scale, box };
       } catch (e) { console.warn(`screenshot at ${scale}x failed`, e); }
     }
     return null;
@@ -94,7 +100,7 @@ async function runExtract(rasterIds: string[]) {
     const frame: IRFrame = {
       id: f.id, name: f.name, slug, width: Math.round(f.width), height: Math.round(f.height),
       screenshot: shotPath, screenshotScale: shot ? shot.scale : 1,
-      screenshotBox: shot ? { x: 0, y: 0, w: Math.round(f.width), h: Math.round(f.height) } : null,
+      screenshotBox: shot ? shot.box : null,
       root,
     };
     doc.frames.push(frame);

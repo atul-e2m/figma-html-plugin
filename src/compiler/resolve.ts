@@ -77,6 +77,7 @@ interface Ctx {
   /** Files the compiler synthesises (composite SVGs), path -> text. */
   generated: Map<string, string>;
   navDepth: number;   // >0 while inside a nav-role container
+  headingDepth: number; // >0 while inside an h1-h6 container: descendants must stay phrasing content
   doc: IRDocument;
   frame: IRFrame;
   idx: IRIndex;
@@ -85,6 +86,8 @@ interface Ctx {
   warnings: string[];
   fonts: Map<string, Set<string>>;
   canvasWidth: number;
+  /** Variant ids that several instances with different pictures hover into (a component's master variant). */
+  sharedVariants: Set<string>;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -336,7 +339,12 @@ function placeConstrained(c: El, n: IRNode, parent: IRNode): void {
       s["transform"] = `translateX(-50%)${s["transform"] ? " " + s["transform"] : ""}`;
       break;
     }
-    case "stretch": s["left"] = px(cx); s["right"] = px(pw - (cx + w)); delete s["width"]; break;
+    case "stretch":
+      // Equal insets around a box narrower than the frame: a centred content row. Fixed insets would
+      // squeeze it on screens between its width and the design width; centre it and cap at 100%.
+      if (Math.abs(rightInset - cx) <= 2 && w < pw * 0.95) { s["left"] = "50%"; s["transform"] = `translateX(-50%)${s["transform"] ? " " + s["transform"] : ""}`; s["width"] = px(w); s["max-width"] = "100%"; delete s["right"]; }
+      else { s["left"] = px(cx); s["right"] = px(pw - (cx + w)); delete s["width"]; }
+      break;
     case "scale": s["left"] = `${r2((cx / pw) * 100)}%`; s["width"] = `${r2((w / pw) * 100)}%`; break;
     default: s["left"] = px(cx);
   }
@@ -415,6 +423,14 @@ function buildText(el: El, n: IRNode, ctx: Ctx): void {
 }
 
 /* -------------------------------------------------------------- walk */
+
+/** Two same-sized copies of one icon, offset diagonally so one sits outside the clip: a swap rig. */
+function sameNameSwap(n: IRNode): boolean {
+  const [a, b] = n.children;
+  if (!a || !b || Math.abs(a.box.w - b.box.w) > 0.5 || Math.abs(a.box.h - b.box.h) > 0.5) return false;
+  const inside = (c: IRNode) => c.box.x >= n.box.x - 0.5 && c.box.y >= n.box.y - 0.5 && c.box.x + c.box.w <= n.box.x + n.box.w + 0.5 && c.box.y + c.box.h <= n.box.y + n.box.h + 0.5;
+  return inside(a) !== inside(b);
+}
 
 function assetOf(ctx: Ctx, id: string | null): IRAsset | undefined {
   if (!id) return undefined;
@@ -502,8 +518,16 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
 
   // Flattened subtree: an exported composite (mask/rotated group, icon group,
   // or a plan-requested raster) stands in for its children.
-  const own = assetOf(ctx, n.asset);
+  let own = assetOf(ctx, n.asset);
   const isLeafish = !n.children.length;
+  // A clipping frame holding two copies of the same icon, each with its own export, inside a hover
+  // component is a swap rig (one arrow flies out while the other flies in). Flattening it to one
+  // picture would freeze the animation: keep the children as elements and let the frame clip them.
+  if (own && n.clips && n.children.length >= 2 && n.children.every((c) => c.asset) && new Set(n.children.map((c) => c.name)).size === 1) {
+    let cur: IRNode | null = n, inState = false;
+    while (cur) { if (cur.states && Object.keys(cur.states).length) { inState = true; break; } cur = ctx.idx.parent.get(cur.id) || null; }
+    if (inState || sameNameSwap(n)) own = undefined;
+  }
   if (deco === "rasterize" && !own) {
     let hasAssets = false; walk(n, (k) => { if (k.asset) hasAssets = true; });
     if (!hasAssets) ctx.warnings.push(`plan asked to rasterize ${n.id} "${n.name}" but no asset was exported; re-extract with this id in the rasterize list`);
@@ -548,6 +572,7 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
 
   if (n.type === "text" && n.text) {
     el.tag = tagForText(n, role);
+    if (ctx.headingDepth > 0) el.tag = "span"; // a heading inside a heading closes the parent in the HTML parser
     // Short text directly inside a nav/menu is a link unless the plan says otherwise.
     if (ctx.navDepth > 0 && n.text.characters.trim().length <= 40 && !n.text.characters.includes("\n")) { el.tag = "a"; el.attrs["href"] = "#"; }
     buildText(el, n, ctx);
@@ -572,7 +597,12 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
 
   // ---- container / shape ---------------------------------------------
   el.tag = tagForContainer(role, depth, bbox);
+  if (ctx.headingDepth > 0) el.tag = "span";
   const kids = n.children;
+  // Decided now, before the children resolve: a heading container (a multi-line headline drawn as
+  // separate layers plus a highlight block) may only hold phrasing content.
+  const HEADING = /^h[1-6]$/;
+  const thisHeading = HEADING.test(plan.tags.get(n.id) || el.tag);
   const pc: PlanContainer | undefined = plan.containers.get(n.id);
   const hasAuto = !!n.layout;
   const flowKids = kids.filter((k) => k.positioning !== "absolute");
@@ -619,6 +649,7 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
   const ordered: Array<{ el: El; ir: IRNode; abs: boolean }> = [];
   const isNav = role === "nav" || el.tag === "nav";
   if (isNav) ctx.navDepth++;
+  if (thisHeading) ctx.headingDepth++;
   // Imported designs record auto-layout the boxes contradict: a child drawn
   // before the previous one ends is not in the sequence (position it), and a
   // child sitting at the far or middle of the cross axis is aligned there.
@@ -649,6 +680,7 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
     ordered.push({ el: c, ir: k, abs });
   }
   if (isNav) ctx.navDepth--;
+  if (thisHeading) ctx.headingDepth--;
   const absKids = ordered.filter((o) => o.abs).map((o) => o.el);
   const flowEls = ordered.filter((o) => !o.abs).map((o) => o.el);
   if (absKids.length) el.style["position"] = el.style["position"] || "relative";
@@ -658,8 +690,14 @@ function resolveNode(n: IRNode, parent: IRNode | null, depth: number, ctx: Ctx):
   // vectors, a photo with its plate) are one visual unit; flowing them apart
   // destroys it. Group each overlapping cluster into one positioned box.
   if (!hasAuto && (mode === "flow" || mode === "grid") && flowEls.length > 1) {
-    const grouped = clusterOverlaps(flowEls, kids);
-    if (grouped !== flowEls) { flowEls.length = 0; flowEls.push(...grouped); }
+    // Every child in one overlapping cluster that fills the frame (a section built from a backdrop,
+    // wave dividers and a content row): the frame IS the composition. A wrapper group here would be
+    // a fixed-width box that neither centres on wide screens nor lets its layers bleed to the edges.
+    if (singleClusterFills(flowEls, bbox)) mode = "absolute";
+    else {
+      const grouped = clusterOverlaps(flowEls, kids);
+      if (grouped !== flowEls) { flowEls.length = 0; flowEls.push(...grouped); }
+    }
   }
   // A grid drawn as a column of row wrappers (two 3-up rows of cards): the
   // cells are the grandchildren; the wrappers carry nothing of their own.
@@ -762,6 +800,12 @@ function applyStates(el: El, n: IRNode, parent: IRNode | null, depth: number, ct
     // The variant's own box is the same size as the instance: a size delta here is a layout artefact, not a hover effect.
     if (Math.abs(n.size.w - sub.size.w) < 0.5) delete rootDelta["width"];
     if (Math.abs(n.size.h - sub.size.h) < 0.5) { delete rootDelta["height"]; delete rootDelta["min-height"]; }
+    // Several instances hover into the same component variant while each shows its own picture: the
+    // variant's picture is the master's, not a hover effect. Keep the instance's image.
+    const sharedVariant = ctx.sharedVariants.has(sub.id);
+    if (sharedVariant) for (const k of ["background-image", "background-size", "background-position", "background-repeat", "background-blend-mode"]) delete rootDelta[k];
+    const inter = n.interactions.find((x) => x.trigger === state);
+    const transition = `all ${inter?.durationMs || 200}ms ${inter?.easing || "ease"}`;
     if (Object.keys(rootDelta).length) {
       if (pseudo === "hover") el.hover = { ...(el.hover || {}), ...rootDelta };
       else el.stateRules.push({ state: pseudo, childId: null, style: rootDelta });
@@ -782,16 +826,17 @@ function applyStates(el: El, n: IRNode, parent: IRNode | null, depth: number, ct
       return out;
     };
     const walk = (a: El, b: El, ai: IRNode, bi: IRNode) => {
-      if (a.children.length !== b.children.length) { ctx.warnings.push(`${state} state of ${n.id} "${n.name}" changes structure under "${a.name}"; only matching children are styled`); }
-      for (const [i, j] of pair(a, b)) {
+      const pairs = pair(a, b);
+      for (const [i, j] of pairs) {
         const ca = a.children[i];
         if (j < 0) { el.stateRules.push({ state: pseudo, childId: ca.id, style: { opacity: "0" } }); continue; }
         const cb = b.children[j];
         const ia = ai.children.find((c) => c.id === ca.id) || ai.children[i], ib = bi.children.find((c) => c.id === cb.id) || bi.children[j];
         const delta = styleDelta(ca.style, cb.style);
-        // Position inside the root: a child that slides on hover (absolute or in flow, translate moves either).
         if (ia && ib) {
-          const dx = (ib.box.x - sub.box.x) - (ia.box.x - n.box.x), dy = (ib.box.y - sub.box.y) - (ia.box.y - n.box.y);
+          // Offset inside the PARENT, not the root: a parent that slides carries its children with it,
+          // so a child only gets its own translate when its place within the parent changed.
+          const dx = (ib.box.x - bi.box.x) - (ia.box.x - ai.box.x), dy = (ib.box.y - bi.box.y) - (ia.box.y - ai.box.y);
           if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
             // Keep the resting transform (e.g. the translateX(-50%) that centres a backdrop) and add the slide.
             const base = ca.style["transform"] ? ca.style["transform"] + " " : "";
@@ -801,14 +846,44 @@ function applyStates(el: El, n: IRNode, parent: IRNode | null, depth: number, ct
           }
         }
         // The variant paints a different picture (a darker overlay baked into the export): swap the image.
-        if (ca.tag === "img" && cb.tag === "img" && ca.src && cb.src && ca.src !== cb.src) delta["content"] = `url("${cb.src}")`;
-        delete delta["width"]; delete delta["height"]; delete delta["min-height"]; // children keep their box; only paint moves
-        if (Object.keys(delta).length) el.stateRules.push({ state: pseudo, childId: ca.id, style: delta });
-        if (ia && ib) walk(ca, cb, ia, ib);
+        if (!sharedVariant && ca.tag === "img" && cb.tag === "img" && ca.src && cb.src && ca.src !== cb.src) delta["content"] = `url("${cb.src}")`;
+        if (sharedVariant) for (const k of ["background-image", "background-size", "background-position", "content"]) delete delta[k];
+        // Children keep their box unless Figma really resized them (a bar that grows to reveal copy).
+        // A growing box gets an explicit resting height too, so the growth animates instead of jumping.
+        delete delta["width"]; delete delta["height"]; delete delta["min-height"];
+        if (ia && ib && !ca.isText) {
+          if (Math.abs(ib.box.h - ia.box.h) > 0.5 && !ca.style["min-height"]) { ca.style["height"] = ca.style["height"] || px(ia.box.h); delta["height"] = px(ib.box.h); }
+          if (Math.abs(ib.box.h - ia.box.h) > 0.5 && ca.style["min-height"]) delta["min-height"] = px(ib.box.h);
+          if (Math.abs(ib.box.w - ia.box.w) > 0.5 && ca.style["width"] && /px$/.test(ca.style["width"])) delta["width"] = px(ib.box.w);
+        }
+        if (Object.keys(delta).length) { el.stateRules.push({ state: pseudo, childId: ca.id, style: delta }); ca.style["transition"] = ca.style["transition"] || transition; }
+        // Descend only where both states have element children: a flattened icon paired with the
+        // variant's un-exported vector group has nothing to diff.
+        if (ia && ib && ca.children.length && cb.children.length) walk(ca, cb, ia, ib);
       }
+      if (a.hasAsset || a.isText || !a.children.length) return;
+      // Layers that exist only in the variant (copy revealed on hover): rendered in the default tree at
+      // the place the variant gives them, positioned so the resting layout is untouched, faded in on
+      // hover. The parent, which grows with them in Figma, got its hover height above.
+      const paired = new Set(pairs.map(([, j]) => j));
+      b.children.forEach((cb, j) => {
+        if (paired.has(j)) return;
+        const ib = bi.children.find((c) => c.id === cb.id) || bi.children[j];
+        if (ib) {
+          cb.style["position"] = "absolute"; cb.style["left"] = px(ib.box.x - bi.box.x); cb.style["top"] = px(ib.box.y - bi.box.y);
+          if (!cb.style["width"] || !/px$/.test(cb.style["width"])) cb.style["width"] = px(ib.box.w);
+          delete cb.style["right"]; delete cb.style["bottom"]; delete cb.style["margin"]; delete cb.style["max-width"];
+        }
+        cb.style["opacity"] = "0"; cb.style["pointer-events"] = "none"; cb.style["transition"] = cb.style["transition"] || transition;
+        a.style["position"] = a.style["position"] || "relative";
+        if (!a.style["overflow"]) a.style["overflow"] = "hidden";
+        a.children.splice(Math.min(j, a.children.length), 0, cb);
+        el.stateRules.push({ state: pseudo, childId: cb.id, style: { opacity: "1" } });
+      });
+      if (a.children.length !== b.children.length) ctx.warnings.push(`${state} state of ${n.id} "${n.name}" changes structure under "${a.name}"; unmatched layers hidden or revealed`);
     };
     walk(el, stateEl, n, sub);
-    if (!el.style["transition"]) { const i = n.interactions.find((x) => x.trigger === state); el.style["transition"] = `all ${i?.durationMs || 200}ms ${i?.easing || "ease"}`; }
+    if (!el.style["transition"]) el.style["transition"] = transition;
     el.style["cursor"] = el.style["cursor"] || "pointer";
   }
 }
@@ -879,7 +954,8 @@ function finishCommon(el: El, n: IRNode, ctx: Ctx, flattened: boolean): void {
   }
   // plan overrides
   const tag = plan.tags.get(n.id);
-  if (tag && !el.hasAsset) el.tag = tag;
+  const PHRASING = new Set(["a", "span", "strong", "em", "b", "i", "small", "mark", "sub", "sup", "button", "img", "svg"]);
+  if (tag && !el.hasAsset) el.tag = ctx.headingDepth > 0 && !PHRASING.has(tag) ? "span" : tag;
   const href = plan.links.get(n.id);
   if (href) { if (!el.hasAsset) el.tag = "a"; el.attrs["href"] = href; }
   if (el.tag === "button") { s["cursor"] = "pointer"; s["border"] = s["border"] || "0"; s["font"] = "inherit"; s["color"] = s["color"] || "inherit"; if (!s["background-color"] && !s["background-image"]) s["background"] = "transparent"; }
@@ -926,7 +1002,12 @@ function applyGrid(el: El, children: El[], n: IRNode, hasAuto: boolean, pc?: Pla
   } else { rowGap = measured.row; colGap = measured.col; }
   s["gap"] = `${px(rowGap)} ${px(colGap)}`;
   delete s["flex-direction"]; delete s["flex-wrap"]; delete s["justify-content"];
-  s["align-items"] = "stretch";
+  // Cards of one row that Figma drew at different heights are hug-sized; stretching them
+  // to the tallest repaints every shorter card. Equal heights stretch (they already match).
+  const byRow = new Map<number, number[]>();
+  for (const c of children) { const key = Math.round(c.box.y / 8); byRow.set(key, [...(byRow.get(key) || []), c.box.h]); }
+  const unequal = [...byRow.values()].some((hs) => hs.length > 1 && Math.max(...hs) - Math.min(...hs) > 4);
+  s["align-items"] = unequal ? "start" : "stretch";
   const widths = children.map((c) => c.box.w).filter((w) => w > 0).sort((a, b) => a - b);
   const median = widths[Math.floor(widths.length / 2)] || 0;
   for (const c of children) {
@@ -1004,6 +1085,19 @@ function overlapRatio(a: Box, b: Box): number {
   return (ox * oy) / Math.max(1, Math.min(a.w * a.h, b.w * b.h));
 }
 
+/** True when all siblings form one overlap cluster whose union covers (almost) the whole box. */
+function singleClusterFills(els: El[], bbox: Box): boolean {
+  const n = els.length;
+  const parentOf = els.map((_, i) => i);
+  const find = (i: number): number => (parentOf[i] === i ? i : (parentOf[i] = find(parentOf[i])));
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (overlapRatio(els[i].box, els[j].box) >= 0.3) parentOf[find(i)] = find(j);
+  const root = find(0);
+  if (!els.every((_, i) => find(i) === root)) return false;
+  const x = Math.min(...els.map((e) => e.box.x)), y = Math.min(...els.map((e) => e.box.y));
+  const x2 = Math.max(...els.map((e) => e.box.x + e.box.w)), y2 = Math.max(...els.map((e) => e.box.y + e.box.h));
+  return x2 - x >= bbox.w * 0.95 && y2 - y >= bbox.h * 0.95;
+}
+
 /** Union overlapping siblings (≥ 30% of the smaller box) into synthetic groups. */
 function clusterOverlaps(els: El[], kids: IRNode[]): El[] {
   const n = els.length;
@@ -1032,9 +1126,15 @@ function clusterOverlaps(els: El[], kids: IRNode[]): El[] {
     const order = new Map(kids.map((k, i) => [k.id, i] as const));
     g.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     for (const m of g) {
-      m.style["position"] = "absolute"; m.style["left"] = px(m.box.x - x); m.style["top"] = px(m.box.y - y);
+      const lx = m.box.x - x, rx = (x2 - x) - (lx + m.box.w);
+      m.style["position"] = "absolute"; m.style["top"] = px(m.box.y - y);
       delete m.style["margin"]; delete m.style["max-width"];
-      if (!m.style["width"]) m.style["width"] = px(m.box.w);
+      // A flow-time fluid cap (width:100% + max-width) means nothing once the member is placed by
+      // coordinates: the designed box is its size. A member centred in the group stays centred and
+      // never wider than the group (a 1271 content row inside a 1923 section on a 1440 screen).
+      if (!m.style["width"] || m.style["width"] === "100%") m.style["width"] = px(m.box.w);
+      if (lx > 2 && Math.abs(lx - rx) <= 2) { m.style["left"] = "50%"; m.style["transform"] = `translateX(-50%)${m.style["transform"] ? " " + m.style["transform"] : ""}`; m.style["max-width"] = "100%"; }
+      else m.style["left"] = px(lx);
       m.box = { x: m.box.x - x, y: m.box.y - y, w: m.box.w, h: m.box.h };
       wrap.children.push(m);
     }
@@ -1142,8 +1242,30 @@ function applyInferredFlow(el: El, children: El[], bbox: Box, pc: PlanContainer 
   if (children.length === 1 && !(pc && pc.direction)) {
     // One child at an offset: a padded block, not an absolutely placed one.
     const c = children[0];
+    // A child that starts before the frame's edge or is bigger than the frame (a 124px logo image
+    // centred on a 54px pill) cannot be padding: it sits at its own coordinates.
+    if (c.box.x < -0.5 || c.box.y < -0.5 || c.box.w > bbox.w + 1 || c.box.h > bbox.h + 1) {
+      s["position"] = s["position"] || "relative";
+      if (!s["height"] && !s["min-height"]) s["height"] = px(bbox.h);
+      if (!s["width"] && !s["flex"]) { s["width"] = px(bbox.w); s["max-width"] = "100%"; }
+      if (!s["overflow"]) s["overflow"] = "visible";
+      placeAbsolute(c, c.box.x, c.box.y);
+      if (!c.style["width"]) c.style["width"] = px(c.box.w);
+      if (!c.style["height"] && !c.isText) c.style["height"] = px(c.box.h);
+      delete c.style["max-width"];
+      el.layoutKind = "absolute";
+      return false;
+    }
     s["display"] = "flex"; s["flex-direction"] = "column"; s["align-items"] = "flex-start";
-    if (c.box.y > 0.5 || c.box.x > 0.5) { s["padding"] = `${px(Math.max(0, c.box.y))} 0 0 ${px(Math.max(0, c.box.x))}`; el.inferredPad = true; }
+    // Equal room on both sides: the child is centred (a 1240 header bar in a 1920 strip), not padded.
+    const centred = c.box.x > 2 && Math.abs(c.box.x - (bbox.w - (c.box.x + c.box.w))) <= 2;
+    if (centred) {
+      s["align-items"] = "center";
+      // A stretched child with a max-width pins to the start edge in CSS; centre it explicitly.
+      if (c.style["align-self"] === "stretch" || c.style["width"] === "100%") c.style["align-self"] = "center";
+      if (c.box.y > 0.5) { s["padding"] = `${px(c.box.y)} 0 0 0`; el.inferredPad = true; }
+    }
+    else if (c.box.y > 0.5 || c.box.x > 0.5) { s["padding"] = `${px(Math.max(0, c.box.y))} 0 0 ${px(Math.max(0, c.box.x))}`; el.inferredPad = true; }
     if (!s["min-height"] && !s["height"]) s["min-height"] = px(bbox.h);
     return false;
   }
@@ -1195,6 +1317,9 @@ function applyInferredFlow(el: El, children: El[], bbox: Box, pc: PlanContainer 
   const kinds = children.map(kind);
   const starts = children.filter((_, i) => kinds[i] === "start");
   const crossPad = starts.length ? Math.max(0, Math.min(...starts.map(start))) : 0;
+  // A child that happens to be centred in the frame but shares the start edge with its
+  // siblings is start-aligned like them; centring it inside the padded box would double the offset.
+  if (starts.length) children.forEach((c, i) => { if (kinds[i] !== "start" && Math.abs(start(c) - crossPad) <= 2) kinds[i] = "start"; });
   if (!starts.length && kinds.every((k) => k === "center")) s["align-items"] = "center";
   else if (!starts.length && kinds.every((k) => k === "end")) s["align-items"] = "flex-end";
   children.forEach((c, i) => {
@@ -1208,12 +1333,24 @@ function applyInferredFlow(el: El, children: El[], bbox: Box, pc: PlanContainer 
     }
   });
   if (flow.direction === "row") {
-    // Items on several lines in the design: this row wraps (a pill list).
+    // Items on several lines in the design: this row wraps (a pill list). Reading order is
+    // line by line, not left to right across lines.
     const cols = inferColumns(children);
     if (cols < children.length) {
       const g = inferGridGaps(children, cols);
       s["flex-wrap"] = "wrap";
       s["gap"] = `${px(g.row)} ${px(g.col)}`;
+      const pinnedTail = children.filter((c) => c.style["position"] === "absolute");
+      const flowing = children.filter((c) => c.style["position"] !== "absolute");
+      sortRowMajor(flowing); children.length = 0; children.push(...flowing, ...pinnedTail);
+    } else {
+      // Figma lets the children run past a fixed frame; flex would shrink them instead.
+      const main = children.filter((c) => c.style["position"] !== "absolute").reduce((t, c) => t + c.box.w, 0) + flow.gap * Math.max(0, children.length - 1);
+      const mainPad0 = Math.max(0, Math.min(...children.map((c) => c.box.x)));
+      if (main + mainPad0 > bbox.w + 1) {
+        for (const c of children) if (c.style["position"] !== "absolute") { c.style["flex-shrink"] = "0"; if (c.style["max-width"] === "100%") delete c.style["max-width"]; }
+        if (!s["overflow"]) s["overflow"] = "visible";
+      }
     }
   }
   const mainPad = Math.max(0, Math.min(...children.map((c) => (row ? c.box.x : c.box.y))));
@@ -1271,7 +1408,17 @@ export function compact(e: El): El {
 export function resolveFrame(doc: IRDocument, frame: IRFrame, plan: Plan, opts: ResolveOptions): ResolvedFrame {
   const idx = indexFrame(frame);
   const pidx = indexPlan(plan);
-  const ctx: Ctx = { generated: new Map(), navDepth: 0, doc, frame, idx, plan: pidx, opts, warnings: [], fonts: new Map(), canvasWidth: frame.width };
+  // Instances that share a hover variant but show different pictures: the variant's picture is the
+  // component master's, so it must not replace the instance's own image on hover.
+  const variantPictures = new Map<string, Set<string>>();
+  walk(frame.root, (k) => {
+    for (const v of Object.values(k.states || {})) {
+      if (!variantPictures.has(v.id)) variantPictures.set(v.id, new Set());
+      variantPictures.get(v.id)!.add(k.fillAsset || "");
+    }
+  });
+  const sharedVariants = new Set([...variantPictures].filter(([, pics]) => pics.size > 1).map(([id]) => id));
+  const ctx: Ctx = { generated: new Map(), navDepth: 0, headingDepth: 0, doc, frame, idx, plan: pidx, opts, warnings: [], fonts: new Map(), canvasWidth: frame.width, sharedVariants };
 
   const root = idx.byId.get(plan.pageRoot) || frame.root;
   const secNodes: Array<{ node: IRNode; ps: Plan["sections"][number] }> = [];
@@ -1305,6 +1452,48 @@ export function resolveFrame(doc: IRDocument, frame: IRFrame, plan: Plan, opts: 
     else ctx.warnings.push(`loose layer ${l.id} "${l.name}" overlaps no section; dropped`);
   }
 
+  // Figma's paint order along the layer path (later siblings paint on top; a container with
+  // "reverse z-index" paints its first child on top). Used for section stacking and for deciding
+  // whether an attached layer sits behind or in front of its section's content.
+  const paintKey = (id: string): number[] => {
+    const key: number[] = [];
+    for (let cur = idx.byId.get(id) || null; cur; ) {
+      const p = idx.parent.get(cur.id) || null;
+      if (!p) break;
+      const i = p.children.findIndex((c) => c.id === cur!.id);
+      key.unshift(p.layout?.reverse ? p.children.length - 1 - i : i);
+      if (p.id === root.id || p.id === frame.root.id) break;
+      cur = p;
+    }
+    return key;
+  };
+  const cmpKeys = (a: number[], b: number[]) => { for (let i = 0; i < Math.max(a.length, b.length); i++) { const d = (a[i] ?? -1) - (b[i] ?? -1); if (d) return d; } return 0; };
+
+  // Attachments per section: what the plan says, loose layers by overlap, and a decoration that
+  // spans several sections (a dotted pattern behind a whole dark band) goes to each one it covers.
+  const attachMap = new Map<string, IRNode[]>();
+  for (const { node, ps } of secNodes) {
+    const list: IRNode[] = [];
+    for (const id of ps.attach) {
+      const a = idx.byId.get(id); if (!a) continue;
+      if (a.id === node.id || isAncestor(idx, node.id, a.id)) { ctx.warnings.push(`plan attaches ${a.id} "${a.name}" to ${ps.slug} but it is already inside it; ignored`); continue; }
+      list.push(a);
+    }
+    for (const a of extra.get(node.id) || []) list.push(a);
+    attachMap.set(node.id, list);
+  }
+  for (const { node } of secNodes) {
+    for (const a of attachMap.get(node.id) || []) {
+      for (const other of secNodes) {
+        if (other.node.id === node.id || isAncestor(idx, other.node.id, a.id)) continue;
+        const ov = overlapY(a.box, other.node.box);
+        if (ov < 40 || ov < Math.min(a.box.h, other.node.box.h) * 0.1) continue;
+        const l = attachMap.get(other.node.id)!;
+        if (!l.includes(a)) l.push(a);
+      }
+    }
+  }
+
   const sections: Section[] = [];
   for (const { node, ps } of secNodes) {
     const el = resolveNode(node, idx.parent.get(node.id) || null, 0, ctx);
@@ -1316,20 +1505,41 @@ export function resolveFrame(doc: IRDocument, frame: IRFrame, plan: Plan, opts: 
     }
     el.cls = ps.slug;
     el.attrs["data-section"] = ps.slug;
-    const toAttach: IRNode[] = [];
-    for (const id of ps.attach) {
-      const a = idx.byId.get(id); if (!a) continue;
-      // Already rendered as part of the section's own subtree: attaching it again would duplicate it.
-      if (a.id === node.id || isAncestor(idx, node.id, a.id)) { ctx.warnings.push(`plan attaches ${a.id} "${a.name}" to ${ps.slug} but it is already inside it; ignored`); continue; }
-      toAttach.push(a);
+    // A section with no paint of its own that sits inside a painted wrapper (two sections grouped
+    // in one dark band) shows the wrapper's fill in Figma; the wrapper itself is never rendered.
+    if (!el.hasAsset && !el.style["background-color"] && !el.style["background-image"] && !el.style["background"]) {
+      for (let anc = idx.parent.get(node.id); anc && anc.id !== root.id && anc.id !== frame.root.id; anc = idx.parent.get(anc.id)) {
+        if (sectionSet.has(anc.id)) break;
+        const covers = anc.box.x <= node.box.x + 1 && anc.box.x + anc.box.w >= node.box.x + node.box.w - 1;
+        if (!covers) continue;
+        const probe: Style = {};
+        const fa = anc.fillAsset ? ctx.doc.assets[anc.fillAsset] : null;
+        applyBackground(probe, backgroundOf(anc.fills, { w: anc.box.w, h: anc.box.h }), fa ? `${ctx.opts.assetPrefix}${fa.file}` : null);
+        if (Object.keys(probe).length) { Object.assign(el.style, probe); break; }
+      }
     }
-    for (const a of extra.get(node.id) || []) toAttach.push(a);
+    const toAttach = attachMap.get(node.id) || [];
+    const secKey = paintKey(node.id);
     for (const a of toAttach) {
       const child = resolveNode(a, idx.parent.get(a.id) || null, 1, ctx);
       if (!child) continue;
+      // The same layer attached to several sections must be several elements: class allocation and
+      // the Elementor element id are keyed by element id.
+      const copies = [...attachMap.values()].filter((l) => l.includes(a)).length;
       const ab = child.hasAsset ? a.renderBox : a.box;
+      if (copies > 1) {
+        child.id = `${a.id}~@${ps.slug}`;
+        // Each copy shows only its own section's slice: a later section paints over an earlier one,
+        // so an unclipped copy would cover the previous section's content.
+        const cut = (v: number) => Math.max(0, Math.round(v * 100) / 100);
+        child.style["clip-path"] = `inset(${px(cut(node.box.y - ab.y))} ${px(cut(ab.x + ab.w - (node.box.x + node.box.w)))} ${px(cut(ab.y + ab.h - (node.box.y + node.box.h)))} ${px(cut(node.box.x - ab.x))})`;
+      }
       placeAbsolute(child, ab.x - node.box.x, ab.y - node.box.y);
-      child.style["z-index"] = "30";
+      // A layer Figma paints before the section is a backdrop (pattern behind the content); one it
+      // paints after is a foreground decoration (badge over the content).
+      const behind = cmpKeys(paintKey(a.id), secKey) < 0;
+      child.style["z-index"] = behind ? "0" : "30";
+      if (behind) child.attrs["data-behind"] = "1";
       if (!child.style["width"]) child.style["width"] = px(ab.w);
       delete child.style["right"]; delete child.style["max-width"];
       el.children.push(child);
@@ -1345,7 +1555,8 @@ export function resolveFrame(doc: IRDocument, frame: IRFrame, plan: Plan, opts: 
       const ins = (v: number) => (v >= 40 ? `min(${px(v)}, ${Math.round((v / fw) * 10000) / 100}vw)` : px(v));
       el.style["width"] = "auto"; el.style["max-width"] = px(node.box.w);
       el.style["margin-left"] = ins(node.box.x); el.style["margin-right"] = ins(right);
-      if (Math.abs(right - node.box.x) <= 2) { el.style["margin-left"] = "auto"; el.style["margin-right"] = "auto"; el.style["width"] = `calc(100% - 2 * ${ins(node.box.x)})`; }
+      // Near-equal margins (62 / 59) are a centred card section: centre it on wide screens too.
+      if (Math.abs(right - node.box.x) <= Math.max(8, node.box.w * 0.01)) { el.style["margin-left"] = "auto"; el.style["margin-right"] = "auto"; el.style["width"] = `calc(100% - 2 * ${ins(node.box.x)})`; }
     }
     sections.push({ el: compact(el), slug: ps.slug, box: { ...node.box }, id: node.id, name: node.name });
   }
@@ -1361,14 +1572,11 @@ export function resolveFrame(doc: IRDocument, frame: IRFrame, plan: Plan, opts: 
     // hangs out of its section must not show through the next one.
     sections.forEach((s, i) => { s.el.style["position"] = s.el.style["position"] || "relative"; s.el.style["z-index"] = String(i + 1); });
   } else {
-    // No auto-layout: the paint order is the layer order of the root's children.
-    const topLevel = (id: string): number => {
-      let cur: IRNode | null = idx.byId.get(id) || null;
-      while (cur) { const p = idx.parent.get(cur.id) || null; if (!p || p.id === root.id || p.id === frame.root.id) break; cur = p; }
-      const host = cur ? idx.parent.get(cur.id) : null;
-      return cur && host ? host.children.findIndex((c) => c.id === cur!.id) : 0;
-    };
-    sections.forEach((s) => { s.el.style["position"] = s.el.style["position"] || "relative"; s.el.style["z-index"] = String(topLevel(s.id) + 1); });
+    // No auto-layout: the paint order is Figma's layer order — the path of sibling indices from the
+    // root, compared lexicographically, so two sections inside one wrapper (a CTA card over the footer,
+    // both children of a Footer instance) still stack the way Figma paints them.
+    const ranked = [...sections].sort((x, y) => cmpKeys(paintKey(x.id), paintKey(y.id)));
+    sections.forEach((s) => { s.el.style["position"] = s.el.style["position"] || "relative"; s.el.style["z-index"] = String(ranked.indexOf(s) + 1); });
   }
   // The frame's own paint shows wherever sections leave a gap (top inset, bottom slack).
   const rootStyle: Style = {};
@@ -1473,7 +1681,18 @@ function splitBleed(sec: El, fw: number, depth = 0): void {
   for (const b of bleed) {
     const st = b.style;
     b.attrs["data-bleed"] = "1";
-    if (!spans(b)) continue;
+    if (!spans(b)) {
+      // A big decoration that does not reach the edges (a dotted pattern behind the content) is
+      // designed against the centred content, not the viewport's left edge: anchor it to the centre.
+      if (st["position"] === "absolute" && st["left"] !== undefined && !st["right"]) {
+        const centreOff = (b.box.x + b.box.w / 2) - sec.box.w / 2;
+        st["width"] = st["width"] || px(b.box.w);
+        st["left"] = Math.abs(centreOff) < 0.5 ? "50%" : `calc(50% + ${px(centreOff)})`;
+        st["transform"] = st["transform"] ? `${st["transform"].replace(/translateX\([^)]*\)\s*/g, "")} translateX(-50%)`.trim() : "translateX(-50%)";
+        delete st["max-width"];
+      }
+      continue;
+    }
     const overhang = b.box.w > sec.box.w + 2;
     // An overhanging composition keeps its designed size (below); only layers that
     // end at the design edges follow the viewport.
