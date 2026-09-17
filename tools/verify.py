@@ -20,7 +20,8 @@ sections = json.loads(a.sections)
 MEASURE_JS = """
 (args) => {
   const [bp, sections, W] = args;
-  const root = document.querySelector(`.page-root[data-bp="${bp}"]`) || document.body;
+  // `.page-root[data-bp]` is the HTML build; a bare `[data-bp]` is the Elementor build's root container.
+  const root = document.querySelector(`.page-root[data-bp="${bp}"]`) || document.querySelector(`[data-bp="${bp}"]`) || document.body;
   const rr = root.getBoundingClientRect();
   const top = rr.top + scrollY;
   const secs = sections.map(s => {
@@ -59,7 +60,8 @@ MEASURE_JS = """
 with sync_playwright() as p:
     b = p.chromium.launch()
     pg = b.new_page(viewport={"width": a.width, "height": 1000}, device_scale_factor=1)
-    pg.goto("file://" + a.html.replace(" ", "%20"))
+    # --html is a compiled file, or a live URL (the Elementor build on a WordPress site).
+    pg.goto(a.html if a.html.startswith(("http://", "https://")) else "file://" + a.html.replace(" ", "%20"), wait_until="networkidle")
     pg.wait_for_timeout(600)
     pg.evaluate("document.querySelectorAll('img[loading]').forEach(i => i.loading = 'eager')")
     h = pg.evaluate("document.documentElement.scrollHeight")
@@ -68,12 +70,35 @@ with sync_playwright() as p:
     pg.evaluate("window.scrollTo(0,0)")
     try: pg.evaluate("document.fonts.ready")
     except Exception: pass
+    # WordPress marks every image loading="lazy"; a photo still decoding when the screenshot is taken
+    # reads as a blank box, and a full-page capture can outrun an async decode. Load + decode them all (bounded).
+    try:
+        pg.evaluate("""() => Promise.race([
+          Promise.all([...document.images].map(i => (i.complete ? Promise.resolve() : new Promise(r => { i.onload = i.onerror = r; })).then(() => i.decode().catch(() => {})))),
+          new Promise(r => setTimeout(r, 60000))])""", timeout=70000)
+    except Exception: pass
     pg.wait_for_timeout(500)
     # Only the frame under test should be visible for the screenshot.
     pg.add_style_tag(content=f'.page-root:not([data-bp="{a.bp}"]) {{ display: none !important; }} .page-root[data-bp="{a.bp}"] {{ display: block !important; }}')
     pg.wait_for_timeout(100)
     m = pg.evaluate(MEASURE_JS, [a.bp, sections, a.width])
-    pg.screenshot(path=f"{a.out}-html.png", full_page=True)
+    # A full-page capture resizes the viewport under the page; responsive images (srcset / sizes="auto")
+    # re-fetch a candidate and paint blank until it lands. Resize first, let every image settle, then shoot.
+    # Also CSS background images (a companion-css hero photo is not in document.images).
+    WAIT_IMAGES = """() => { const urls = new Set(); for (const el of document.querySelectorAll('*')) { const bg = getComputedStyle(el).backgroundImage; if (bg && bg !== 'none') for (const m of bg.matchAll(/url\\("?([^")]+)"?\\)/g)) urls.add(m[1]); }
+      const bgs = [...urls].map(u => new Promise(r => { const i = new Image(); i.onload = i.onerror = r; i.src = u; }));
+      return Promise.race([
+        Promise.all([...document.images].map(i => (i.complete ? Promise.resolve() : new Promise(r => { i.onload = i.onerror = r; })).then(() => i.decode().catch(() => {}))).concat(bgs)),
+        new Promise(r => setTimeout(r, 60000))]); }"""
+    full_h = pg.evaluate("document.documentElement.scrollHeight")
+    if full_h <= 16000:
+        pg.set_viewport_size({"width": a.width, "height": full_h}); pg.wait_for_timeout(300)
+        try: pg.evaluate(WAIT_IMAGES, timeout=70000)
+        except Exception: pass
+        pg.wait_for_timeout(300)
+        pg.screenshot(path=f"{a.out}-html.png", full_page=False)
+    else:
+        pg.screenshot(path=f"{a.out}-html.png", full_page=True)
     b.close()
 
 m["expectedHeight"] = a.height

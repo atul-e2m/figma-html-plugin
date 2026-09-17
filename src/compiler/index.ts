@@ -7,6 +7,7 @@ import type { Plan, ResponsivePlan } from "../ir/plan.ts";
 import { resolveFrame, type ResolvedFrame } from "./resolve.ts";
 import { collectRules, emitHtml, emitCss, fontFaces, type Breakpoint } from "./emit.ts";
 import { applyResponsive, pruneMedia } from "./responsive.ts";
+import { emitElementor, type ElementorOptions, type ElementorReport } from "./elementor.ts";
 
 export interface CompileOptions {
   responsive?: ResponsivePlan | null;
@@ -62,7 +63,18 @@ export function defaultBreakpoints(frames: IRFrame[], rp?: ResponsivePlan | null
   return frames.map((f) => byId.get(f.id)!);
 }
 
-export function compileDocument(doc: IRDocument, plans: Map<string, Plan>, opts: CompileOptions = {}): CompileOutput {
+/** F2H_DEBUG_ID=<figma id> prints that node's style (and its parent's) after each compile stage. */
+function debugNode(rf: ResolvedFrame, stage: string): void {
+  const id = process.env.F2H_DEBUG_ID; if (!id) return;
+  const find = (e: import("./resolve.ts").El, parent: import("./resolve.ts").El | null): void => {
+    if (e.id === id) { console.error(`[debug ${stage}] ${id} <${e.tag}.${e.cls}> role=${e.role} layout=${e.layoutKind}`, JSON.stringify(e.style), "\n   parent:", parent ? `<${parent.tag}.${parent.cls}> ${JSON.stringify(parent.style)}` : "-"); }
+    e.children.forEach((c) => find(c, e));
+  };
+  for (const s of rf.sections) find(s.el, null);
+}
+
+/** IR + plans -> resolved element trees with the responsive baseline applied. Shared by every emitter. */
+export function resolveDocument(doc: IRDocument, plans: Map<string, Plan>, opts: CompileOptions = {}): { resolved: ResolvedFrame[]; bps: Breakpoint[] } {
   const assetPrefix = opts.assetPrefix ?? "assets/";
   const resolved: ResolvedFrame[] = [];
   const bps = defaultBreakpoints(doc.frames, opts.responsive);
@@ -70,12 +82,46 @@ export function compileDocument(doc: IRDocument, plans: Map<string, Plan>, opts:
     const plan = plans.get(frame.id);
     if (!plan) throw new Error(`no plan for frame ${frame.id} (${frame.name})`);
     const rf = resolveFrame(doc, frame, plan, { assetPrefix, inlineSvg: opts.inlineSvg ?? true });
+    debugNode(rf, "after resolve");
     const ridx = new Map<string, Array<{ at: "tablet" | "phone"; action: import("./responsive.ts").ResponsiveAction; columns?: number }>>();
     for (const r of plan.responsive || []) { if (!ridx.has(r.id)) ridx.set(r.id, []); ridx.get(r.id)!.push({ at: r.at, action: r.action, columns: r.columns || undefined }); }
     applyResponsive(rf.sections, frame.width, ridx);
+    debugNode(rf, "after responsive");
     pruneMedia(rf.sections, frame.width, { min: bps[i].min ?? 0, max: bps[i].max });
     resolved.push(rf);
   });
+  return { resolved, bps };
+}
+
+export interface ElementorCompileOutput {
+  /** template.json, elementor.css, report.json and synthesised SVGs; paths relative to the output folder. */
+  files: Map<string, string>;
+  /** Bundle asset files (relative to assets/) the template references. */
+  assetFiles: Set<string>;
+  report: ElementorReport;
+}
+
+/** IR + plans -> Elementor Editor V4 template. Same resolve stage as compileDocument, different emitter. */
+export function compileElementor(doc: IRDocument, plans: Map<string, Plan>, opts: CompileOptions & ElementorOptions): ElementorCompileOutput {
+  const { resolved } = resolveDocument(doc, plans, { ...opts, inlineSvg: true });
+  const out = emitElementor(resolved, {
+    publicBase: opts.publicBase, title: opts.title,
+    fontsUnavailable: opts.fontsUnavailable ?? (doc.meta.fonts || []).filter((f) => !f.available || f.missing).map((f) => f.family),
+  });
+  const files = new Map<string, string>([
+    ["template.json", JSON.stringify(out.template, null, 2)],
+    ["elementor.css", out.css],
+    ["report.json", JSON.stringify(out.report, null, 2)],
+  ]);
+  const assetFiles = new Set<string>();
+  for (const a of out.assets) if (a.startsWith("assets/")) assetFiles.add(a.slice("assets/".length));
+  for (const [p, text] of out.generated) { files.set(p, text); assetFiles.delete(p.replace(/^assets\//, "")); }
+  return { files, assetFiles, report: out.report };
+}
+
+export function compileDocument(doc: IRDocument, plans: Map<string, Plan>, opts: CompileOptions = {}): CompileOutput {
+  const assetPrefix = opts.assetPrefix ?? "assets/";
+  const { resolved, bps } = resolveDocument(doc, plans, opts);
   const R = collectRules(resolved);
   const first = resolved[0];
   const title = opts.title || first.plan.page.title || first.frame.name;

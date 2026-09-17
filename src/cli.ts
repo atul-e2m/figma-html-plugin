@@ -5,6 +5,7 @@
  *   f2h unzip   <zip> [dir]                 unpack a plugin export
  *   f2h plan    <bundle> [--no-model|--model] [--dry-run] [--effort high]
  *   f2h compile <bundle> [--out dir]
+ *   f2h elementor <bundle> [--out dir] [--public-base url]   Elementor Editor V4 template -> out/elementor/
  *   f2h verify  <bundle> [--out dir]        render + diff against the Figma screenshot
  *   f2h refine  <bundle> [--out dir]        feed verify measurements back to the planner
  *   f2h build   <bundle> [--no-model] [--refine N] [--out dir]   plan → compile → verify (→ refine → …)
@@ -18,7 +19,7 @@ import type { IRDocument } from "./ir/schema.ts";
 import type { Plan, ResponsivePlan } from "./ir/plan.ts";
 import { planFrame, refinePlan, responsivePlan } from "./planner/index.ts";
 import { defaultResponsivePlan } from "./planner/default.ts";
-import { compileDocument } from "./compiler/index.ts";
+import { compileDocument, compileElementor } from "./compiler/index.ts";
 import type { VerifyMeasurements } from "./planner/prompt.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -155,27 +156,65 @@ function cmdCompile(dir: string, flags: Record<string, string | boolean>): strin
   return out;
 }
 
+/** Elementor Editor V4 template + companion css -> <out>/elementor/. */
+function cmdElementor(dir: string, flags: Record<string, string | boolean>): string {
+  const doc = loadBundle(dir);
+  const { plans, responsive, missing } = loadPlans(dir, doc);
+  if (missing.length) throw new Error(`no plan for ${missing.join(", ")}; run: f2h plan ${dir}`);
+  const out = path.join(typeof flags["out"] === "string" ? flags["out"] : path.join(dir, "out"), "elementor");
+  const publicBase = typeof flags["public-base"] === "string" ? flags["public-base"] : `http://localhost/f2h/${path.basename(dir)}`;
+  const t0 = Date.now();
+  const res = compileElementor(doc, plans, { responsive, publicBase });
+  fs.mkdirSync(path.join(out, "assets"), { recursive: true });
+  for (const [f, text] of res.files) { fs.mkdirSync(path.dirname(path.join(out, f)), { recursive: true }); fs.writeFileSync(path.join(out, f), text); }
+  let copied = 0, missingAssets = 0;
+  for (const a of res.assetFiles) {
+    const src = path.join(dir, "assets", a);
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(out, "assets", a)); copied++; } else missingAssets++;
+  }
+  const r = res.report;
+  const n = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
+  const kinds = Object.entries(r.elements).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}×${v}`).join(", ");
+  log(`elementor: ${n(r.elements)} elements (${kinds}) in ${Date.now() - t0}ms; ${n(r.nativeProps)} native props, ${n(r.companionProps)} companion declarations in ${r.companionRules} rules; ${copied} assets${missingAssets ? `, ${missingAssets} MISSING` : ""} -> ${out}/template.json`);
+  const top = Object.entries(r.companionProps).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}×${v}`).join(", ");
+  if (top) log(`  companion css carries: ${top}`);
+  for (const w of r.warnings.slice(0, 10)) log(`  ! ${w}`);
+  if (typeof flags["public-base"] !== "string") log(`  assets are addressed at ${publicBase}; pass --public-base <url> (tools/elementor_deploy.sh does) before importing`);
+  return out;
+}
+
 function cmdVerify(dir: string, flags: Record<string, string | boolean>): Map<string, VerifyMeasurements> {
   const doc = loadBundle(dir);
   const out = typeof flags["out"] === "string" ? flags["out"] : path.join(dir, "out");
   const reportFile = path.join(out, "report.json");
   if (!fs.existsSync(reportFile)) throw new Error(`no ${reportFile}; run compile first`);
   const report = JSON.parse(fs.readFileSync(reportFile, "utf8")) as ReturnType<typeof compileDocument>["report"];
-  const verifyDir = path.join(out, "verify");
+  // --url <page>: verify a deployed Elementor page instead of out/index.html (results under out/elementor/verify/).
+  const url = typeof flags["url"] === "string" ? flags["url"] : "";
+  const verifyDir = url ? path.join(out, "elementor", "verify") : path.join(out, "verify");
   fs.mkdirSync(verifyDir, { recursive: true });
   const results = new Map<string, VerifyMeasurements>();
   for (const f of report.frames) {
+    if (url && f.width !== Math.max(...report.frames.map((x) => x.width))) continue; // the Elementor build is the widest frame only
     const frame = doc.frames.find((x) => x.id === f.id)!;
     const shot = frame.screenshot ? path.join(dir, frame.screenshot) : "";
     const args = [
       path.join(here, "..", "tools", "verify.py"),
-      "--html", path.join(out, "index.html"), "--width", String(f.width), "--height", String(f.height),
+      "--html", url || path.join(out, "index.html"), "--width", String(f.width), "--height", String(f.height),
       "--bp", f.slug, "--sections", JSON.stringify(f.sections), "--out", path.join(verifyDir, f.slug),
     ];
     if (shot && fs.existsSync(shot)) {
       // Newer bundles record the box the screenshot covers; older ones exported the render bounds.
       const sb = frame.screenshotBox, rb = frame.root.renderBox, bb = frame.root.box;
-      const origin = sb ? `${sb.x},${sb.y}` : `${rb.x - bb.x},${rb.y - bb.y}`;
+      let origin = sb ? `${sb.x},${sb.y}` : `${rb.x - bb.x},${rb.y - bb.y}`;
+      // The PNG is the truth: a frame's own effect pads the export on every side, and older plugins
+      // recorded the frame box instead. Centre the box in the pixels when the sizes disagree.
+      const dims = pngSize(shot);
+      if (dims && sb) {
+        const sc = frame.screenshotScale || 1;
+        const padX = (dims.w / sc - sb.w) / 2, padY = (dims.h / sc - sb.h) / 2;
+        if (Math.abs(padX) >= 1 || Math.abs(padY) >= 1) { origin = `${sb.x - padX},${sb.y - padY}`; log(`  screenshot is ${dims.w}x${dims.h} for a ${sb.w}x${sb.h} box; origin ${origin}`); }
+      }
       args.push("--shot", shot, "--scale", String(frame.screenshotScale), "--shot-origin", origin, "--text-boxes", JSON.stringify(f.textBoxes || []));
     }
     log(`verify ${f.slug} @ ${f.width}px…`);
@@ -187,9 +226,10 @@ function cmdVerify(dir: string, flags: Record<string, string | boolean>): Map<st
     const others = doc.frames.filter((x) => x.id !== f.id).map((x) => x.width);
     // Narrower widths no other frame serves, plus one wide screen for the widest frame (bleed check).
     const widest = Math.max(...doc.frames.map((x) => x.width));
-    const widths = [1024, 768, 390].filter((w) => w < f.width && !others.some((o) => Math.abs(o - w) < 200));
+    // 1440 covers the laptop range between the tablet query and a 1920 design; skipped for 1440 designs.
+    const widths = [1440, 1024, 768, 390].filter((w) => w < f.width - 100 && !others.some((o) => Math.abs(o - w) < 200));
     if (f.width === widest) widths.unshift(2560);
-    if (widths.length && !flags["no-audit"]) {
+    if (widths.length && !flags["no-audit"] && !url) {
       const ra = spawnSync("python3", [path.join(here, "..", "tools", "audit.py"), "--html", path.join(out, "index.html"), "--bp", f.slug, "--widths", widths.join(","), "--out", path.join(verifyDir, f.slug)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
       if (ra.status !== 0) log(`audit failed:\n${ra.stderr}`);
       else {
@@ -282,16 +322,25 @@ async function main() {
       case "unzip": { if (!target) throw new Error("usage: f2h unzip <zip> [dir]"); unzip(target, pos[2] || target.replace(/\.zip$/i, "")); break; }
       case "plan": await cmdPlan(need(target), flags); break;
       case "compile": cmdCompile(need(target), flags); break;
+      case "elementor": cmdElementor(need(target), flags); break;
       case "raster-list": cmdRasterList(need(target)); break;
       case "verify": cmdVerify(need(target), flags); break;
       case "refine": await cmdRefine(need(target), flags); break;
       case "responsive": await cmdResponsive(need(target), flags); break;
       case "build": await cmdBuild(need(target), flags); break;
       default:
-        console.error("usage: f2h <unzip|plan|compile|verify|refine|responsive|build|raster-list> <bundle-dir> [--no-model] [--provider anthropic|openrouter] [--model id] [--dry-run] [--replan] [--out dir] [--refine N]");
+        console.error("usage: f2h <unzip|plan|compile|elementor|verify|refine|responsive|build|raster-list> <bundle-dir> [--no-model] [--provider anthropic|openrouter] [--model id] [--dry-run] [--replan] [--out dir] [--refine N] [--public-base url]");
         process.exit(cmd ? 1 : 0);
     }
   } catch (e) { log(`error: ${(e as Error).message}`); process.exit(1); }
+}
+/** Width/height from a PNG's IHDR chunk. */
+function pngSize(file: string): { w: number; h: number } | null {
+  try {
+    const fd = fs.openSync(file, "r"); const buf = Buffer.alloc(24); fs.readSync(fd, buf, 0, 24, 0); fs.closeSync(fd);
+    if (buf.toString("ascii", 1, 4) !== "PNG") return null;
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  } catch { return null; }
 }
 function need(t?: string): string { if (!t) throw new Error("bundle directory required"); return path.resolve(t); }
 main();

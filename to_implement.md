@@ -85,3 +85,28 @@ the signal for a new compiler rule.
 `f2h regress` — rebuild and verify every bundle under `v2 tests/`, compare against the last stored
 numbers (`v2 tests/baseline.json`), fail on any pixel or layout-only regression above a threshold.
 Today this sweep is run by hand after each rule.
+
+## 7. Elementor V4 emitter — follow-ups
+
+Built 2026-09-16 (`src/compiler/elementor.ts`, `tools/elementor_deploy.sh`, README "Elementor (Editor V4)").
+Edwards 1.16 % / 0.53 %, PixeSaaS 3.32 % / 1.14 %, Private Discovery 2.03 % / 1.29 % — the same numbers as
+the HTML build, heights exact. E2M staging (licensed New Grotesk missing) 6.83 % / 4.17 % vs HTML 5.17 % / 2.44 %. Known gaps, in the order they hurt:
+
+- **Companion css is still large** (`report.json` → `companionProps`): `white-space`, `text-box-trim`,
+  `transform: none` in media variants, descendant hover deltas, text-run styles. Each is either a V4
+  schema gap (file upstream / wait) or a candidate for an Elementor *global class* instead of `#f2h-…`.
+- **Multi-frame exports** emit the widest frame only. Design: map the mobile frame's sections onto
+  `mobile` variants of the same elements (needs `sectionPairs`, item 4).
+- **Styled text runs** use `<span id>` + companion css. V4 `html-v3` has a `children` array meant for
+  exactly this; the editor-side shape is not documented in PHP — read the editor JS before using it.
+- **Filters**: only `blur` and `drop-shadow` map; brightness/contrast/saturate arg prop keys unverified.
+- **Video**: poster emitted as `e-image`; `e-self-hosted-video` needs a video attachment.
+- **Kit interference**: the emitter states typography and box defaults explicitly; a Kit with global
+  *button* or *link* styles (`a:hover` colour, button hover background) can still show through — audit
+  on a client Kit, not only Hello + blank Kit.
+- **Deploy**: Local-only (wp-cli under the site's PHP). A remote target needs the REST route
+  (`elementor/v1/...`) or a zip upload through the library UI; assets must be reachable at `--public-base`.
+- **Verify capture**: WordPress emits `srcset`/lazy images; a full-page capture resizes the viewport and
+  the photos re-fetch and paint blank. verify.py now resizes the viewport first, waits for every image
+  to load + decode, then captures (`full_page=False`). A blank photo in `-side.png` with
+  `broken images 0` means this path regressed, not the emitter.
